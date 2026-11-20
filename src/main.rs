@@ -14,6 +14,28 @@ use vnc::{PixelFormat, Rect, VncClient, VncConnector, VncEncoding, VncEvent, X11
 use crate::input::Pointer;
 use crate::terminal::{Control, ScaleMode, Terminal};
 
+const DEFAULT_SERVER: &str = "127.0.0.1:5901";
+
+fn server_arg(args: &[String]) -> Result<Option<&str>> {
+    let address = match args {
+        [] => DEFAULT_SERVER,
+        [arg] if matches!(arg.as_str(), "-h" | "--help") => return Ok(None),
+        [address] if !address.starts_with('-') => address,
+        _ => bail!("expected a single HOST:PORT argument (see --help)"),
+    };
+
+    ensure!(
+        address.rsplit_once(':').is_some_and(|(host, port)| {
+            !host.is_empty()
+                && !host.starts_with('-')
+                && (!host.contains(':') || (host.starts_with('[') && host.ends_with(']')))
+                && port.parse::<u16>().is_ok_and(|port| port != 0)
+        }),
+        "invalid server address; expected HOST:PORT (use [IPv6]:PORT for IPv6)"
+    );
+    Ok(Some(address))
+}
+
 struct Frame {
     width: usize,
     height: usize,
@@ -150,18 +172,14 @@ async fn view(client: &VncClient, terminal: &mut Terminal) -> Result<()> {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let address = args.next().unwrap_or_else(|| "127.0.0.1:5901".into());
-    if matches!(address.as_str(), "-h" | "--help") {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let Some(address) = server_arg(&args)? else {
         println!(
-            "Usage: terminal-x11-kitty [HOST:PORT]\nDefault: 127.0.0.1:5901\nUses VNC_PASSWORD if set, otherwise prompts.\nClick Close or press F12 to exit."
+            "Usage: {} [HOST:PORT]\n\n  HOST:PORT   VNC server (default: {DEFAULT_SERVER})\n  -h, --help  Show this help\n\nUses VNC_PASSWORD if set, otherwise prompts.\nClick Close or press F12 to exit.",
+            env!("CARGO_PKG_NAME"),
         );
         return Ok(());
-    }
-    ensure!(
-        args.next().is_none(),
-        "usage: terminal-x11-kitty [HOST:PORT]"
-    );
+    };
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
         "run this directly in a Kitty graphics-compatible terminal pane"
@@ -173,7 +191,7 @@ async fn main() -> Result<()> {
         Err(_) => bail!("VNC_PASSWORD must contain valid UTF-8"),
     };
     let client = time::timeout(Duration::from_secs(15), async {
-        let stream = TcpStream::connect(&address)
+        let stream = TcpStream::connect(address)
             .await
             .with_context(|| format!("could not connect to {address}"))?;
         let client = VncConnector::new(stream)
@@ -203,6 +221,34 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_positional_server_and_default() {
+        for (args, expected) in [
+            (&[][..], Some("127.0.0.1:5901")),
+            (&["desktop.local:5902"][..], Some("desktop.local:5902")),
+            (&["[::1]:5903"][..], Some("[::1]:5903")),
+            (&["--help"][..], None),
+        ] {
+            let args: Vec<_> = args.iter().map(|arg| arg.to_string()).collect();
+            assert_eq!(server_arg(&args).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_server_arguments() {
+        for args in [
+            &["--server", "localhost:5901"][..],
+            &["localhost"][..],
+            &["localhost:65536"][..],
+            &["::1:5901"][..],
+            &["localhost:5901", "localhost:5902"][..],
+            &["--unknown"][..],
+        ] {
+            let args: Vec<_> = args.iter().map(|arg| arg.to_string()).collect();
+            assert!(server_arg(&args).is_err());
+        }
+    }
 
     #[test]
     fn applies_rectangles_and_ignores_pixel_padding() {

@@ -6,9 +6,16 @@ Run inside a Rex pane:
 cargo run --release
 ```
 
-The default server is `127.0.0.1:5901`. To use another address, run
-`cargo run --release -- HOST:PORT`. The viewer uses `VNC_PASSWORD` if set;
-otherwise it prompts for the password without echoing it.
+The default server is `127.0.0.1:5901`. Pass `HOST:PORT` as the only argument
+to connect to a different server:
+
+```sh
+cargo run --release -- desktop.local:5902
+```
+
+Put IPv6 addresses in brackets, for example `cargo run --release -- '[::1]:5901'`.
+The viewer uses `VNC_PASSWORD` if set; otherwise it prompts for the password
+without echoing it.
 
 The desktop is centered in a border that fills the pane and automatically
 rescales when the pane is resized. Click the **Fit / Fill** button to switch
