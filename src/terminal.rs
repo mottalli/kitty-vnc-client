@@ -8,8 +8,9 @@ use crate::Frame;
 
 const CLOSE_LABEL: &str = "[ Close ]";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ScaleMode {
+    #[default]
     Fit,
     Fill,
 }
@@ -32,9 +33,41 @@ impl ScaleMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum Sampling {
+    #[default]
+    Smooth,
+    Nearest,
+}
+
+impl Sampling {
+    pub(crate) fn toggled(self) -> Self {
+        match self {
+            Self::Smooth => Self::Nearest,
+            Self::Nearest => Self::Smooth,
+        }
+    }
+
+    fn label(self, compact: bool) -> &'static str {
+        match (self, compact) {
+            (Self::Smooth, false) => "[ Smooth: on  ]",
+            (Self::Nearest, false) => "[ Smooth: off ]",
+            (Self::Smooth, true) => "[S+]",
+            (Self::Nearest, true) => "[S-]",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RenderOptions {
+    pub(crate) scale: ScaleMode,
+    pub(crate) sampling: Sampling,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Control {
     Scale,
+    Smoothing,
     Close,
 }
 
@@ -67,7 +100,10 @@ impl Pane {
         }
     }
 
-    fn buttons(self, scale: ScaleMode) -> impl Iterator<Item = (usize, &'static str, Control)> {
+    fn buttons(
+        self,
+        options: RenderOptions,
+    ) -> impl Iterator<Item = (usize, &'static str, Control)> {
         let close = match self.cols {
             0 => None,
             1 | 2 => Some((self.cols - 1, "x", Control::Close)),
@@ -77,23 +113,37 @@ impl Pane {
             cols => Some((cols - 2, "x", Control::Close)),
         };
         let scale_toggle = close.and_then(|(col, _, _)| {
-            let label = scale.label(false);
+            let label = options.scale.label(false);
             if col > label.len() + 1 {
                 Some((col - label.len() - 1, label, Control::Scale))
             } else if self.cols >= 4 {
                 Some((
                     col.saturating_sub(2).max(1),
-                    scale.label(true),
+                    options.scale.label(true),
                     Control::Scale,
                 ))
             } else {
                 None
             }
         });
-        scale_toggle.into_iter().chain(close)
+        let smoothing_toggle = scale_toggle.and_then(|(col, _, _)| {
+            [options.sampling.label(false), options.sampling.label(true)]
+                .into_iter()
+                .find(|label| col > label.len() + 1)
+                .map(|label| (col - label.len() - 1, label, Control::Smoothing))
+        });
+        smoothing_toggle
+            .into_iter()
+            .chain(scale_toggle)
+            .chain(close)
     }
 
-    pub(crate) fn control_at(self, column: u16, row: u16, scale: ScaleMode) -> Option<Control> {
+    pub(crate) fn control_at(
+        self,
+        column: u16,
+        row: u16,
+        options: RenderOptions,
+    ) -> Option<Control> {
         let (x, y) = (usize::from(column), usize::from(row));
         let (col, row) = if self.pixels {
             (x / self.cell_width, y / self.cell_height)
@@ -103,17 +153,17 @@ impl Pane {
         if row != 0 || self.rows == 0 {
             return None;
         }
-        self.buttons(scale)
+        self.buttons(options)
             .find(|(start, label, _)| (*start..*start + label.len()).contains(&col))
             .map(|(_, _, control)| control)
     }
 
-    fn paint(self, mut out: impl Write, scale: ScaleMode) -> io::Result<()> {
+    fn paint(self, mut out: impl Write, options: RenderOptions) -> io::Result<()> {
         write!(out, "\x1b[2J")?;
         if self.cols == 0 || self.rows == 0 {
             return Ok(());
         }
-        let mut buttons = self.buttons(scale).peekable();
+        let mut buttons = self.buttons(options).peekable();
         write!(out, "\x1b[H")?;
         let mut col = 0;
         if self.cols >= 3 {
@@ -141,12 +191,14 @@ impl Pane {
         Ok(())
     }
 
-    fn paint_scale(self, mut out: impl Write, scale: ScaleMode) -> io::Result<()> {
-        if self.rows > 0
-            && let Some((col, label, _)) =
-                self.buttons(scale).find(|entry| entry.2 == Control::Scale)
-        {
-            write!(out, "\x1b[1;{}H\x1b[7m{label}\x1b[27m", col + 1)?;
+    fn paint_toggles(self, mut out: impl Write, options: RenderOptions) -> io::Result<()> {
+        if self.rows > 0 {
+            for (col, label, _) in self
+                .buttons(options)
+                .filter(|entry| entry.2 != Control::Close)
+            {
+                write!(out, "\x1b[1;{}H\x1b[7m{label}\x1b[27m", col + 1)?;
+            }
         }
         Ok(())
     }
@@ -261,7 +313,7 @@ pub(crate) struct Terminal {
     image_ids: [u32; 2],
     next: usize,
     mouse_mode: u16,
-    painted: Option<(Pane, ScaleMode)>,
+    painted: Option<(Pane, RenderOptions)>,
 }
 
 impl Terminal {
@@ -294,21 +346,21 @@ impl Terminal {
         &mut self,
         pane: Pane,
         frame: Option<&Frame>,
-        scale: ScaleMode,
+        options: RenderOptions,
     ) -> io::Result<Option<Viewport>> {
         let image = frame.and_then(|frame| {
-            Viewport::new(pane, frame.width, frame.height, scale).map(|view| (view, frame))
+            Viewport::new(pane, frame.width, frame.height, options.scale).map(|view| (view, frame))
         });
         let mut out = io::BufWriter::new(self.out.lock());
         draw_frame(
             &mut out,
             pane,
-            scale,
+            options,
             self.painted,
             image,
             [self.image_ids[self.next], self.image_ids[1 - self.next]],
         )?;
-        self.painted = Some((pane, scale));
+        self.painted = Some((pane, options));
         if image.is_some() {
             self.next = 1 - self.next;
         }
@@ -325,8 +377,8 @@ impl Terminal {
 fn draw_frame(
     mut out: impl Write,
     pane: Pane,
-    scale: ScaleMode,
-    previous: Option<(Pane, ScaleMode)>,
+    options: RenderOptions,
+    previous: Option<(Pane, RenderOptions)>,
     image: Option<(Viewport, &Frame)>,
     [id, old]: [u32; 2],
 ) -> io::Result<()> {
@@ -334,16 +386,16 @@ fn draw_frame(
     if repaint {
         // Some terminals discard Kitty images on a screen clear, including uploads
         // that haven't been placed yet. Clear and repaint before uploading.
-        pane.paint(&mut out, scale)?;
+        pane.paint(&mut out, options)?;
     }
     if let Some((view, frame)) = image {
-        upload(&mut out, id, view, frame)?;
+        upload(&mut out, id, view, frame, options.sampling)?;
     }
 
     // Swap the placement and update the label without clearing the screen.
     write!(out, "\x1b[?2026h")?;
-    if !repaint && previous != Some((pane, scale)) {
-        pane.paint_scale(&mut out, scale)?;
+    if !repaint && previous != Some((pane, options)) {
+        pane.paint_toggles(&mut out, options)?;
     }
     if let Some((view, _)) = image {
         view.place(&mut out, pane, id)?;
@@ -351,9 +403,15 @@ fn draw_frame(
     write!(out, "\x1b_Ga=d,d=I,i={old},q=2;\x1b\\\x1b[?2026l")
 }
 
-fn upload(mut out: impl Write, id: u32, view: Viewport, frame: &Frame) -> io::Result<()> {
+fn upload(
+    mut out: impl Write,
+    id: u32,
+    view: Viewport,
+    frame: &Frame,
+    sampling: Sampling,
+) -> io::Result<()> {
     let mut compressor = ZlibEncoder::new(Vec::new(), Compression::fast());
-    compressor.write_all(&frame.scaled_rgb(view.width, view.height))?;
+    compressor.write_all(&frame.scaled_rgb(view.width, view.height, sampling)?)?;
     let payload = STANDARD.encode(compressor.finish()?);
     let chunks = payload.as_bytes().chunks(4096);
     let count = chunks.len();
@@ -405,12 +463,22 @@ mod tests {
         for old_scale in [ScaleMode::Fit, ScaleMode::Fill] {
             let scale = old_scale.toggled();
             let view = Viewport::new(pane, frame.width, frame.height, scale).unwrap();
+            let options = RenderOptions {
+                scale,
+                ..RenderOptions::default()
+            };
             let mut output = Vec::new();
             draw_frame(
                 &mut output,
                 pane,
-                scale,
-                Some((pane, old_scale)),
+                options,
+                Some((
+                    pane,
+                    RenderOptions {
+                        scale: old_scale,
+                        ..options
+                    },
+                )),
                 Some((view, &frame)),
                 [2, 1],
             )
@@ -438,14 +506,14 @@ mod tests {
             ..old_pane
         };
         let frame = Frame::new(16, 10);
-        let scale = ScaleMode::Fit;
-        let view = Viewport::new(pane, frame.width, frame.height, scale).unwrap();
+        let options = RenderOptions::default();
+        let view = Viewport::new(pane, frame.width, frame.height, options.scale).unwrap();
         let mut output = Vec::new();
         draw_frame(
             &mut output,
             pane,
-            scale,
-            Some((old_pane, scale)),
+            options,
+            Some((old_pane, options)),
             Some((view, &frame)),
             [2, 1],
         )
@@ -524,8 +592,9 @@ mod tests {
         assert_eq!(view.cells, Some((74, 22)));
         assert_eq!(view.point(3, 1, false), Some((2, 4)));
         assert_eq!(view.point(2, 1, false), None);
-        assert_eq!(pane.control_at(70, 0, ScaleMode::Fit), Some(Control::Close));
-        assert_eq!(pane.control_at(70, 1, ScaleMode::Fit), None);
+        let options = RenderOptions::default();
+        assert_eq!(pane.control_at(70, 0, options), Some(Control::Close));
+        assert_eq!(pane.control_at(70, 1, options), None);
 
         let fill = Viewport::new(pane, 320, 192, ScaleMode::Fill).unwrap();
         assert_eq!((fill.left, fill.top, fill.cells), (1, 1, Some((78, 22))));
@@ -561,7 +630,14 @@ mod tests {
             height: 480,
         });
         let mut border = Vec::new();
-        pane.paint(&mut border, ScaleMode::Fill).unwrap();
+        pane.paint(
+            &mut border,
+            RenderOptions {
+                scale: ScaleMode::Fill,
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
         assert!(
             String::from_utf8(border)
                 .unwrap()
@@ -569,6 +645,9 @@ mod tests {
         );
         for scale in [ScaleMode::Fit, ScaleMode::Fill] {
             for (x, y, hit) in [
+                (449, 19, None),
+                (450, 19, Some(Control::Smoothing)),
+                (599, 19, Some(Control::Smoothing)),
                 (609, 19, None),
                 (610, 19, Some(Control::Scale)),
                 (689, 19, Some(Control::Scale)),
@@ -578,7 +657,12 @@ mod tests {
                 (790, 19, None),
                 (700, 20, None),
             ] {
-                assert_eq!(pane.control_at(x, y, scale), hit);
+                for sampling in [Sampling::Smooth, Sampling::Nearest] {
+                    assert_eq!(
+                        pane.control_at(x, y, RenderOptions { scale, sampling }),
+                        hit
+                    );
+                }
             }
         }
     }
@@ -592,9 +676,10 @@ mod tests {
                 width: 0,
                 height: 0,
             });
-            pane.paint(Vec::new(), ScaleMode::Fit).unwrap();
+            let options = RenderOptions::default();
+            pane.paint(Vec::new(), options).unwrap();
             let hits: Vec<_> = (0..cols)
-                .filter_map(|col| pane.control_at(col, 0, ScaleMode::Fit))
+                .filter_map(|col| pane.control_at(col, 0, options))
                 .collect();
             assert!(hits.contains(&Control::Close));
             assert_eq!(hits.contains(&Control::Scale), cols >= 4);

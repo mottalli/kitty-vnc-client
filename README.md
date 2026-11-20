@@ -20,7 +20,10 @@ without echoing it.
 The desktop is centered in a border that fills the pane and automatically
 rescales when the pane is resized. Click the **Fit / Fill** button to switch
 modes: **Fit** preserves proportions; **Fill** stretches the full desktop
-to cover the inside of the frame without cropping. Mouse movement, clicks,
+to cover the inside of the frame without cropping. In both viewers, click
+**Smooth** to switch between filtered scaling (the default) and the original
+nearest-neighbor scaling. Neither mode alters the image at native size.
+Mouse movement, clicks,
 drags, scrolling, and common keyboard shortcuts go to the remote desktop.
 **Click Close or press F12** to exit locally.
 

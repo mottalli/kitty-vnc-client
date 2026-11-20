@@ -5,7 +5,11 @@ use std::io;
 
 use anyhow::{Result, ensure};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
-use terminal::{Control, Pane, ScaleMode, Terminal, Viewport};
+use fast_image_resize::{
+    FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
+    images::{Image, ImageRef},
+};
+use terminal::{Control, Pane, RenderOptions, Sampling, Terminal, Viewport};
 
 pub use input::{KEY_MODIFIERS, key_tap};
 
@@ -45,7 +49,37 @@ impl Frame {
         Ok(())
     }
 
-    fn scaled_rgb(&self, width: usize, height: usize) -> Vec<u8> {
+    fn scaled_rgb(&self, width: usize, height: usize, sampling: Sampling) -> io::Result<Vec<u8>> {
+        let rgb_pixels = |pixels: &[u8]| {
+            pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[0], p[1], p[2]])
+                .collect()
+        };
+        if (width, height) == (self.width, self.height) {
+            return Ok(rgb_pixels(&self.rgba));
+        }
+        if sampling == Sampling::Smooth {
+            let src = ImageRef::new(
+                self.width as u32,
+                self.height as u32,
+                &self.rgba,
+                PixelType::U8x4,
+            )
+            .map_err(io::Error::other)?;
+            let mut dst = Image::new(width as u32, height as u32, PixelType::U8x4);
+            // X11/VNC pixels have a padding byte, not alpha.
+            let options = ResizeOptions::new()
+                .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+                .use_alpha(false);
+            Resizer::new()
+                .resize(&src, &mut dst, &options)
+                .map_err(io::Error::other)?;
+            return Ok(rgb_pixels(dst.buffer()));
+        }
+
         let mut rgb = Vec::with_capacity(width * height * 3);
         for y in 0..height {
             let row = (y * self.height / height) * self.width;
@@ -54,7 +88,7 @@ impl Frame {
                 rgb.extend_from_slice(&self.rgba[offset..offset + 3]);
             }
         }
-        rgb
+        Ok(rgb)
     }
 }
 
@@ -77,7 +111,7 @@ pub enum ViewerEvent {
 pub struct Viewer {
     terminal: Terminal,
     pane: Pane,
-    scale: ScaleMode,
+    options: RenderOptions,
     viewport: Option<Viewport>,
     pointer: input::Pointer,
     pressed: Option<Control>,
@@ -88,12 +122,12 @@ impl Viewer {
     pub fn open() -> io::Result<Self> {
         let mut terminal = Terminal::open()?;
         let pane = terminal.pane()?;
-        let scale = ScaleMode::Fit;
-        let viewport = terminal.draw(pane, None, scale)?;
+        let options = RenderOptions::default();
+        let viewport = terminal.draw(pane, None, options)?;
         Ok(Self {
             terminal,
             pane,
-            scale,
+            options,
             viewport,
             pointer: input::Pointer::default(),
             pressed: None,
@@ -109,7 +143,7 @@ impl Viewer {
         // Pixel dimensions can change without the row or column counts changing.
         let pane = self.terminal.pane()?;
         if changed || self.dirty || self.pane != pane {
-            self.viewport = self.terminal.draw(pane, frame, self.scale)?;
+            self.viewport = self.terminal.draw(pane, frame, self.options)?;
             self.pane = pane;
             self.dirty = false;
             if self.viewport.is_none() {
@@ -134,7 +168,7 @@ impl Viewer {
                 }
             }
             Event::Mouse(mouse) => {
-                let hit = self.pane.control_at(mouse.column, mouse.row, self.scale);
+                let hit = self.pane.control_at(mouse.column, mouse.row, self.options);
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) if hit.is_some() => {
                         self.pressed = hit;
@@ -145,7 +179,11 @@ impl Viewer {
                             match hit {
                                 Some(Control::Close) => return ViewerEvent::Quit,
                                 Some(Control::Scale) => {
-                                    self.scale = self.scale.toggled();
+                                    self.options.scale = self.options.scale.toggled();
+                                    self.dirty = true;
+                                }
+                                Some(Control::Smoothing) => {
+                                    self.options.sampling = self.options.sampling.toggled();
                                     self.dirty = true;
                                 }
                                 None => {}
@@ -181,7 +219,32 @@ mod tests {
         let mut frame = Frame::new(2, 2);
         let rect = (1, 0, 1, 2);
         frame.update(rect, &[1, 2, 3, 0, 4, 5, 6, 255]).unwrap();
-        assert_eq!(frame.scaled_rgb(2, 2), [0, 0, 0, 1, 2, 3, 0, 0, 0, 4, 5, 6]);
+        for sampling in [Sampling::Smooth, Sampling::Nearest] {
+            assert_eq!(
+                frame.scaled_rgb(2, 2, sampling).unwrap(),
+                [0, 0, 0, 1, 2, 3, 0, 0, 0, 4, 5, 6]
+            );
+        }
         assert!(frame.update(rect, &[1, 2, 3]).is_err());
+    }
+
+    #[test]
+    fn smoothing_blends_edges_when_enlarging_or_shrinking() {
+        let mut frame = Frame::new(2, 1);
+        frame
+            .pixels_mut()
+            .copy_from_slice(&[0, 0, 0, 255, 255, 255, 255, 0]);
+        for (width, nearest) in [
+            (3, vec![0, 0, 0, 0, 0, 0, 255, 255, 255]),
+            (1, vec![0, 0, 0]),
+        ] {
+            let smooth = frame.scaled_rgb(width, 1, Sampling::Smooth).unwrap();
+            assert_eq!(
+                frame.scaled_rgb(width, 1, Sampling::Nearest).unwrap(),
+                nearest
+            );
+            let middle = (width / 2) * 3;
+            assert_eq!(&smooth[middle..middle + 3], &[128; 3]);
+        }
     }
 }
