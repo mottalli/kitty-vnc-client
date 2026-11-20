@@ -5,14 +5,14 @@ use std::io::{self, IsTerminal};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail, ensure};
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind};
+use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
 use tokio::net::TcpStream;
 use tokio::time::{self, MissedTickBehavior};
 use vnc::{PixelFormat, Rect, VncClient, VncConnector, VncEncoding, VncEvent, X11Event};
 
 use crate::input::Pointer;
-use crate::terminal::{Terminal, Viewport};
+use crate::terminal::{Control, ScaleMode, Terminal};
 
 struct Frame {
     width: usize,
@@ -67,8 +67,11 @@ async fn view(client: &VncClient, terminal: &mut Terminal) -> Result<()> {
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     tick.tick().await; // The library already requests a full initial framebuffer.
     let mut frame = None::<Frame>;
-    let mut viewport = None::<Viewport>;
+    let mut pane = terminal.pane()?;
+    let mut scale = ScaleMode::Fit;
+    let mut viewport = terminal.draw(pane, None, scale)?;
     let mut dirty = false;
+    let mut pressed_control = None;
 
     loop {
         tokio::select! {
@@ -81,15 +84,41 @@ async fn view(client: &VncClient, terminal: &mut Terminal) -> Result<()> {
                     input::send_key(client, key).await?;
                 }
                 Event::Mouse(mouse) => {
+                    let hit = pane.control_at(mouse.column, mouse.row, scale);
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) if hit.is_some() => {
+                            pressed_control = hit;
+                            continue;
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) if pressed_control.is_some() => continue,
+                        MouseEventKind::Up(MouseButton::Left) if pressed_control.is_some() => {
+                            if pressed_control.take() == hit {
+                                match hit {
+                                    Some(Control::Close) => {
+                                        pointer.release(client).await?;
+                                        return Ok(());
+                                    }
+                                    Some(Control::Scale) => {
+                                        scale = scale.toggled();
+                                        dirty = true;
+                                    }
+                                    None => {}
+                                }
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
                     if let Some(viewport) = viewport {
                         pointer.send(client, mouse, viewport).await?;
                     }
                 }
-                Event::Resize(..) => dirty = frame.is_some(),
+                Event::Resize(..) => dirty = true,
                 _ => {}
             },
             event = client.recv_event() => match event.context("VNC connection closed")? {
                 VncEvent::SetResolution(size) => {
+                    pointer.release(client).await?;
                     frame = Some(Frame::new(size.width, size.height));
                     viewport = None;
                     dirty = true;
@@ -104,12 +133,14 @@ async fn view(client: &VncClient, terminal: &mut Terminal) -> Result<()> {
             },
             _ = tick.tick() => {
                 client.input(X11Event::Refresh).await?;
-                if dirty
-                    && let Some(frame) = &frame
-                    && let Some(current) = terminal.viewport(frame.width, frame.height)?
-                {
-                    terminal.draw(current, frame)?;
-                    viewport = Some(current);
+                // Pixel dimensions can change even if the row and column counts do not.
+                let current = terminal.pane()?;
+                if dirty || pane != current {
+                    viewport = terminal.draw(current, frame.as_ref(), scale)?;
+                    if viewport.is_none() {
+                        pointer.release(client).await?;
+                    }
+                    pane = current;
                     dirty = false;
                 }
             }
@@ -123,7 +154,7 @@ async fn main() -> Result<()> {
     let address = args.next().unwrap_or_else(|| "127.0.0.1:5901".into());
     if matches!(address.as_str(), "-h" | "--help") {
         println!(
-            "Usage: terminal-x11-kitty [HOST:PORT]\nDefault: 127.0.0.1:5901\nF12 exits the viewer."
+            "Usage: terminal-x11-kitty [HOST:PORT]\nDefault: 127.0.0.1:5901\nUses VNC_PASSWORD if set, otherwise prompts.\nClick Close or press F12 to exit."
         );
         return Ok(());
     }
@@ -136,7 +167,11 @@ async fn main() -> Result<()> {
         "run this directly in a Kitty graphics-compatible terminal pane"
     );
 
-    let password = rpassword::prompt_password("VNC password: ")?;
+    let password = match std::env::var("VNC_PASSWORD") {
+        Ok(password) => password,
+        Err(std::env::VarError::NotPresent) => rpassword::prompt_password("VNC password: ")?,
+        Err(_) => bail!("VNC_PASSWORD must contain valid UTF-8"),
+    };
     let client = time::timeout(Duration::from_secs(15), async {
         let stream = TcpStream::connect(&address)
             .await

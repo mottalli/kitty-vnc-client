@@ -652,7 +652,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "terminal-x11-kitty"
+name = "terminal-vnc-kitty"
 version = "0.1.0"
 dependencies = [
  "anyhow",

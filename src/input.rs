@@ -17,12 +17,17 @@ impl Pointer {
         view: Viewport,
     ) -> Result<(), VncError> {
         use MouseEventKind::*;
-        let Some(position) = view.point(mouse.column, mouse.row, self.buttons != 0) else {
+        let captured = match mouse.kind {
+            Drag(button) | Up(button) if self.buttons & button_bit(button) == 0 => return Ok(()),
+            Drag(_) | Up(_) => true,
+            _ => false,
+        };
+        let Some(position) = view.point(mouse.column, mouse.row, captured) else {
             return Ok(());
         };
         self.position = position;
         let wheel = match mouse.kind {
-            Down(button) | Drag(button) => {
+            Down(button) => {
                 self.buttons |= button_bit(button);
                 0
             }
@@ -34,7 +39,7 @@ impl Pointer {
             ScrollDown => 16,
             ScrollLeft => 32,
             ScrollRight => 64,
-            Moved => 0,
+            Moved | Drag(_) => 0,
         };
         self.report(client, self.buttons | wheel).await?;
         if wheel != 0 {
