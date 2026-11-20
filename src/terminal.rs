@@ -140,6 +140,16 @@ impl Pane {
         }
         Ok(())
     }
+
+    fn paint_scale(self, mut out: impl Write, scale: ScaleMode) -> io::Result<()> {
+        if self.rows > 0
+            && let Some((col, label, _)) =
+                self.buttons(scale).find(|entry| entry.2 == Control::Scale)
+        {
+            write!(out, "\x1b[1;{}H\x1b[7m{label}\x1b[27m", col + 1)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -289,24 +299,19 @@ impl Terminal {
         let image = frame.and_then(|frame| {
             Viewport::new(pane, frame.width, frame.height, scale).map(|view| (view, frame))
         });
-        let id = self.image_ids[self.next];
-        let old = self.image_ids[1 - self.next];
         let mut out = io::BufWriter::new(self.out.lock());
-        if let Some((view, frame)) = image {
-            upload(&mut out, id, view, frame)?;
-        }
-
-        // Upload out of sight, then swap the placements inside the border.
-        write!(out, "\x1b[?2026h")?;
-        if self.painted != Some((pane, scale)) {
-            pane.paint(&mut out, scale)?;
-            self.painted = Some((pane, scale));
-        }
-        if let Some((view, _)) = image {
-            view.place(&mut out, pane, id)?;
+        draw_frame(
+            &mut out,
+            pane,
+            scale,
+            self.painted,
+            image,
+            [self.image_ids[self.next], self.image_ids[1 - self.next]],
+        )?;
+        self.painted = Some((pane, scale));
+        if image.is_some() {
             self.next = 1 - self.next;
         }
-        write!(out, "\x1b_Ga=d,d=I,i={old},q=2;\x1b\\\x1b[?2026l")?;
         let mode = if pane.pixels { 1016 } else { 1006 };
         if mode != self.mouse_mode {
             write!(out, "\x1b[?{}l\x1b[?{mode}h", self.mouse_mode)?;
@@ -315,6 +320,35 @@ impl Terminal {
         out.flush()?;
         Ok(image.map(|(view, _)| view))
     }
+}
+
+fn draw_frame(
+    mut out: impl Write,
+    pane: Pane,
+    scale: ScaleMode,
+    previous: Option<(Pane, ScaleMode)>,
+    image: Option<(Viewport, &Frame)>,
+    [id, old]: [u32; 2],
+) -> io::Result<()> {
+    let repaint = previous.is_none_or(|(prev, _)| prev != pane);
+    if repaint {
+        // Some terminals discard Kitty images on a screen clear, including uploads
+        // that haven't been placed yet. Clear and repaint before uploading.
+        pane.paint(&mut out, scale)?;
+    }
+    if let Some((view, frame)) = image {
+        upload(&mut out, id, view, frame)?;
+    }
+
+    // Swap the placement and update the label without clearing the screen.
+    write!(out, "\x1b[?2026h")?;
+    if !repaint && previous != Some((pane, scale)) {
+        pane.paint_scale(&mut out, scale)?;
+    }
+    if let Some((view, _)) = image {
+        view.place(&mut out, pane, id)?;
+    }
+    write!(out, "\x1b_Ga=d,d=I,i={old},q=2;\x1b\\\x1b[?2026l")
 }
 
 fn upload(mut out: impl Write, id: u32, view: Viewport, frame: &Frame) -> io::Result<()> {
@@ -358,6 +392,70 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_toggle_replaces_image_without_clearing_the_screen() {
+        let pane = Pane::new(terminal::WindowSize {
+            columns: 40,
+            rows: 20,
+            width: 320,
+            height: 320,
+        });
+        let frame = Frame::new(16, 10);
+        for old_scale in [ScaleMode::Fit, ScaleMode::Fill] {
+            let scale = old_scale.toggled();
+            let view = Viewport::new(pane, frame.width, frame.height, scale).unwrap();
+            let mut output = Vec::new();
+            draw_frame(
+                &mut output,
+                pane,
+                scale,
+                Some((pane, old_scale)),
+                Some((view, &frame)),
+                [2, 1],
+            )
+            .unwrap();
+            let output = String::from_utf8(output).unwrap();
+            assert!(!output.contains("\x1b[2J"));
+            assert!(output.contains(scale.label(false)));
+            let upload = output.find("\x1b_Ga=t,").unwrap();
+            let place = output.find("\x1b_Ga=p,i=2,").unwrap();
+            let delete = output.find("\x1b_Ga=d,d=I,i=1,").unwrap();
+            assert!(upload < place && place < delete);
+        }
+    }
+
+    #[test]
+    fn resize_clears_before_uploading_the_replacement_image() {
+        let old_pane = Pane::new(terminal::WindowSize {
+            columns: 40,
+            rows: 20,
+            width: 320,
+            height: 320,
+        });
+        let pane = Pane {
+            cols: 30,
+            ..old_pane
+        };
+        let frame = Frame::new(16, 10);
+        let scale = ScaleMode::Fit;
+        let view = Viewport::new(pane, frame.width, frame.height, scale).unwrap();
+        let mut output = Vec::new();
+        draw_frame(
+            &mut output,
+            pane,
+            scale,
+            Some((old_pane, scale)),
+            Some((view, &frame)),
+            [2, 1],
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        let clear = output.rfind("\x1b[2J").unwrap();
+        let upload = output.find("\x1b_Ga=t,").unwrap();
+        let place = output.find("\x1b_Ga=p,i=2,").unwrap();
+        assert!(clear < upload && upload < place);
+    }
 
     #[test]
     fn fits_pane_and_maps_pixels() {

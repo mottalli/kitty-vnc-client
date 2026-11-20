@@ -30,3 +30,23 @@ server. It redraws the whole Kitty image when the framebuffer changes. Mouse
 position falls back to character-cell resolution if the pane's PTY doesn't
 report its pixel size. Clipboard sync and held-key combinations are not
 implemented.
+
+## Direct X11 viewer (experimental)
+
+From the shell started by `xvfb-run`, run an X11 app and launch the separate
+viewer in the same Rex pane:
+
+```sh
+xclock &
+cargo run --release --bin kitty-x11
+```
+
+It connects directly to the X server in `$DISPLAY` (e.g. `:99`) using your
+existing X authorization. You can also pass a display explicitly with
+`cargo run --release --bin kitty-x11 -- :99`; keep the matching `XAUTHORITY`.
+On Unix, you can also pass the absolute path to a mounted X11 socket instead
+of a display name. In that case the viewer uses screen 0 and looks up display
+0 in the authorization file.
+No VNC server or password is needed. The viewer captures the entire X screen
+and forwards mouse and basic keyboard input via XTEST. Click **Close** or
+press **F12** to exit the viewer without stopping Xvfb.

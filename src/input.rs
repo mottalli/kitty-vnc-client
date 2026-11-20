@@ -1,7 +1,6 @@
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use vnc::{VncClient, VncError, X11Event};
-
+use crate::PointerUpdate;
 use crate::terminal::Viewport;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 #[derive(Default)]
 pub(crate) struct Pointer {
@@ -10,22 +9,14 @@ pub(crate) struct Pointer {
 }
 
 impl Pointer {
-    pub(crate) async fn send(
-        &mut self,
-        client: &VncClient,
-        mouse: MouseEvent,
-        view: Viewport,
-    ) -> Result<(), VncError> {
+    pub(crate) fn update(&mut self, mouse: MouseEvent, view: Viewport) -> Option<PointerUpdate> {
         use MouseEventKind::*;
         let captured = match mouse.kind {
-            Drag(button) | Up(button) if self.buttons & button_bit(button) == 0 => return Ok(()),
+            Drag(button) | Up(button) if self.buttons & button_bit(button) == 0 => return None,
             Drag(_) | Up(_) => true,
             _ => false,
         };
-        let Some(position) = view.point(mouse.column, mouse.row, captured) else {
-            return Ok(());
-        };
-        self.position = position;
+        self.position = view.point(mouse.column, mouse.row, captured)?;
         let wheel = match mouse.kind {
             Down(button) => {
                 self.buttons |= button_bit(button);
@@ -41,26 +32,26 @@ impl Pointer {
             ScrollRight => 64,
             Moved | Drag(_) => 0,
         };
-        self.report(client, self.buttons | wheel).await?;
-        if wheel != 0 {
-            self.report(client, self.buttons).await?;
-        }
-        Ok(())
+        Some(self.report(wheel))
     }
 
-    pub(crate) async fn release(&mut self, client: &VncClient) -> Result<(), VncError> {
+    pub(crate) fn release(&mut self) -> Option<PointerUpdate> {
         if self.buttons != 0 {
             self.buttons = 0;
-            self.report(client, 0).await?;
+            Some(self.report(0))
+        } else {
+            None
         }
-        Ok(())
     }
 
-    async fn report(&self, client: &VncClient, buttons: u8) -> Result<(), VncError> {
+    fn report(&self, wheel: u8) -> PointerUpdate {
         let (x, y) = self.position;
-        client
-            .input(X11Event::PointerEvent((x, y, buttons).into()))
-            .await
+        PointerUpdate {
+            x,
+            y,
+            buttons: self.buttons,
+            wheel,
+        }
     }
 }
 
@@ -72,41 +63,20 @@ fn button_bit(button: MouseButton) -> u8 {
     }
 }
 
-pub(crate) async fn send_key(client: &VncClient, key: KeyEvent) -> Result<(), VncError> {
-    let Some(symbol) = keysym(key.code) else {
-        return Ok(());
-    };
+pub const KEY_MODIFIERS: [(KeyModifiers, u32); 4] = [
+    (KeyModifiers::SHIFT, 0xffe1),
+    (KeyModifiers::CONTROL, 0xffe3),
+    (KeyModifiers::ALT, 0xffe9),
+    (KeyModifiers::SUPER, 0xffeb),
+];
+
+pub fn key_tap(key: KeyEvent) -> Option<(u32, KeyModifiers)> {
+    let symbol = keysym(key.code)?;
     let mut modifiers = key.modifiers;
     if key.code == KeyCode::BackTab {
         modifiers |= KeyModifiers::SHIFT;
     }
-    // Most terminal key reports give a press but no release. Send a tap, with
-    // the indicated modifiers held for its duration.
-    let held = [
-        (KeyModifiers::SHIFT, 0xffe1),
-        (KeyModifiers::CONTROL, 0xffe3),
-        (KeyModifiers::ALT, 0xffe9),
-        (KeyModifiers::SUPER, 0xffeb),
-    ];
-    for (flag, key) in held {
-        if modifiers.contains(flag) {
-            report_key(client, key, true).await?;
-        }
-    }
-    report_key(client, symbol, true).await?;
-    report_key(client, symbol, false).await?;
-    for (flag, key) in held.into_iter().rev() {
-        if modifiers.contains(flag) {
-            report_key(client, key, false).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn report_key(client: &VncClient, symbol: u32, pressed: bool) -> Result<(), VncError> {
-    client
-        .input(X11Event::KeyEvent((symbol, pressed).into()))
-        .await
+    Some((symbol, modifiers))
 }
 
 fn keysym(code: KeyCode) -> Option<u32> {
