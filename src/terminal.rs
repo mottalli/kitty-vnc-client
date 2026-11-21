@@ -13,7 +13,7 @@ pub(crate) use geometry::{Pane, Viewport};
 use kitty::KittyRenderer;
 use text::TextRenderer;
 
-const CLOSE_LABEL: &str = "[ Close ]";
+const CLOSE_LABEL: &str = "[X]";
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ScaleMode {
@@ -88,11 +88,11 @@ impl Pane {
     fn buttons(self, options: RenderOptions) -> impl Iterator<Item = Button> {
         let close = (self.cols > 0).then(|| {
             let (col, label) = match self.cols {
-                1 | 2 => (self.cols - 1, "x"),
+                1 | 2 => (self.cols - 1, "X"),
                 cols if cols >= CLOSE_LABEL.len() + 4 => {
                     (cols - 1 - CLOSE_LABEL.len(), CLOSE_LABEL)
                 }
-                cols => (cols - 2, "x"),
+                cols => (cols - 2, "X"),
             };
             Button {
                 col,
@@ -146,7 +146,7 @@ impl Pane {
             .map(|button| button.control)
     }
 
-    fn paint(self, mut out: impl Write, options: RenderOptions) -> io::Result<()> {
+    fn paint(self, mut out: impl Write, options: RenderOptions, title: &str) -> io::Result<()> {
         write!(out, "\x1b[2J")?;
         if self.cols == 0 || self.rows == 0 {
             return Ok(());
@@ -157,9 +157,13 @@ impl Pane {
         if self.cols >= 3 {
             write!(out, "╭")?;
             col = 1;
-            if buttons.peek().is_some_and(|button| button.col >= 7) {
-                write!(out, " VNC ")?;
-                col += " VNC ".len();
+            let title_width = title.len() + 2;
+            if buttons
+                .peek()
+                .is_some_and(|button| button.col > col + title_width)
+            {
+                write!(out, " {title} ")?;
+                col += title_width;
             }
         }
         let divider = if self.cols >= 3 { "─" } else { " " };
@@ -224,6 +228,7 @@ fn renderer_for(mode: RenderMode) -> Box<dyn Renderer> {
 struct Chrome {
     pane: Pane,
     options: RenderOptions,
+    title: &'static str,
 }
 
 enum ChromeUpdate {
@@ -236,6 +241,7 @@ struct RenderSurface<'a> {
     out: &'a mut dyn Write,
     pane: Pane,
     options: RenderOptions,
+    title: &'static str,
     chrome: ChromeUpdate,
 }
 
@@ -243,13 +249,16 @@ impl<'a> RenderSurface<'a> {
     fn new(out: &'a mut dyn Write, current: Chrome, previous: Option<Chrome>) -> Self {
         let chrome = match previous {
             Some(previous) if previous == current => ChromeUpdate::Unchanged,
-            Some(previous) if previous.pane == current.pane => ChromeUpdate::TogglesOnly,
+            Some(previous) if previous.pane == current.pane && previous.title == current.title => {
+                ChromeUpdate::TogglesOnly
+            }
             _ => ChromeUpdate::Repaint,
         };
         Self {
             out,
             pane: current.pane,
             options: current.options,
+            title: current.title,
             chrome,
         }
     }
@@ -262,7 +271,7 @@ impl<'a> RenderSurface<'a> {
     /// repaint must come first because an erase may discard an uploaded image.
     fn prepare_output(&mut self) -> io::Result<&mut dyn Write> {
         if self.needs_repaint() {
-            self.pane.paint(&mut self.out, self.options)?;
+            self.pane.paint(&mut self.out, self.options, self.title)?;
             self.chrome = ChromeUpdate::Unchanged;
         }
         Ok(self.out)
@@ -272,7 +281,9 @@ impl<'a> RenderSurface<'a> {
         self.out.write_all(b"\x1b[?2026h")?;
         let result = (|| {
             match self.chrome {
-                ChromeUpdate::Repaint => self.pane.paint(&mut *self.out, self.options)?,
+                ChromeUpdate::Repaint => {
+                    self.pane.paint(&mut *self.out, self.options, self.title)?
+                }
                 ChromeUpdate::TogglesOnly => {
                     self.pane.paint_toggles(&mut *self.out, self.options)?
                 }
@@ -324,16 +335,18 @@ pub(crate) struct Terminal<I: TerminalIo> {
     renderer: Box<dyn Renderer>,
     mouse: MouseCoordinates,
     painted: Option<Chrome>,
+    title: &'static str,
 }
 
 impl<I: TerminalIo> Terminal<I> {
-    pub(crate) fn open(mut io: I, mode: RenderMode) -> io::Result<Self> {
+    pub(crate) fn open(mut io: I, mode: RenderMode, title: &'static str) -> io::Result<Self> {
         io.set_raw_mode(true)?;
         let mut screen = Self {
             io,
             renderer: renderer_for(mode),
             mouse: MouseCoordinates::Cells,
             painted: None,
+            title,
         };
         {
             let mut out = screen.io.writer();
@@ -362,7 +375,11 @@ impl<I: TerminalIo> Terminal<I> {
         frame: Option<&Frame>,
         options: RenderOptions,
     ) -> io::Result<Option<Viewport>> {
-        let chrome = Chrome { pane, options };
+        let chrome = Chrome {
+            pane,
+            options,
+            title: self.title,
+        };
         let mut out = io::BufWriter::new(self.io.writer());
         let view = self
             .renderer
@@ -401,9 +418,9 @@ mod tests {
     #[test]
     fn renderers_share_a_surface_but_choose_their_own_output_and_mouse_units() {
         let size = terminal::WindowSize {
-            columns: 40,
+            columns: 60,
             rows: 20,
-            width: 320,
+            width: 480,
             height: 320,
         };
         let frame = Frame::new(16, 10);
@@ -421,6 +438,7 @@ mod tests {
             let chrome = Chrome {
                 pane,
                 options: RenderOptions::default(),
+                title: "Test Driver",
             };
             let mut out = Vec::new();
             let view = renderer
@@ -431,7 +449,8 @@ mod tests {
             let out = String::from_utf8(out).unwrap();
             assert_eq!(out.contains("\x1b_G"), mode == RenderMode::Kitty);
             assert_eq!(out.contains('▀'), mode == RenderMode::Text);
-            assert!(out.contains("[ Close ]"));
+            assert!(out.contains(CLOSE_LABEL));
+            assert!(out.contains("╭ Test Driver "));
         }
     }
 
@@ -453,26 +472,27 @@ mod tests {
                 scale: ScaleMode::Fill,
                 ..RenderOptions::default()
             },
+            "Test Driver",
         )
         .unwrap();
         assert!(
             String::from_utf8(border)
                 .unwrap()
-                .contains("\x1b[7m[ Fill ]\x1b[27m─\x1b[7m[ Close ]\x1b[27m╮")
+                .contains("\x1b[7m[ Fill ]\x1b[27m─\x1b[7m[X]\x1b[27m╮")
         );
         for scale in [ScaleMode::Fit, ScaleMode::Fill] {
             for (x, y, hit) in [
-                (449, 19, None),
-                (450, 19, Some(Control::Smoothing)),
-                (599, 19, Some(Control::Smoothing)),
-                (609, 19, None),
-                (610, 19, Some(Control::Scale)),
-                (689, 19, Some(Control::Scale)),
-                (699, 19, None),
-                (700, 19, Some(Control::Close)),
+                (509, 19, None),
+                (510, 19, Some(Control::Smoothing)),
+                (659, 19, Some(Control::Smoothing)),
+                (669, 19, None),
+                (670, 19, Some(Control::Scale)),
+                (749, 19, Some(Control::Scale)),
+                (759, 19, None),
+                (760, 19, Some(Control::Close)),
                 (789, 19, Some(Control::Close)),
                 (790, 19, None),
-                (700, 20, None),
+                (760, 20, None),
             ] {
                 for sampling in [Sampling::Smooth, Sampling::Nearest] {
                     assert_eq!(
@@ -499,7 +519,7 @@ mod tests {
                 MouseCoordinates::Pixels,
             );
             let options = RenderOptions::default();
-            pane.paint(Vec::new(), options).unwrap();
+            pane.paint(Vec::new(), options, "Test Driver").unwrap();
             let hits: Vec<_> = (0..cols)
                 .filter_map(|col| pane.control_at(col, 0, options))
                 .collect();

@@ -23,10 +23,10 @@ use crate::input::{
 use crate::session::{self, DesktopBackend, DesktopUpdate};
 use crate::{Frame, RenderMode};
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct X11Target(X11Address);
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 enum X11Address {
     #[default]
     Environment,
@@ -123,7 +123,7 @@ fn connect_display(
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct X11Connection {
     pub target: X11Target,
     pub authority: X11Authority,
@@ -381,6 +381,10 @@ impl XDisplay {
 }
 
 impl DesktopBackend for XDisplay {
+    fn frame_title(&self) -> &'static str {
+        "X11"
+    }
+
     fn frame(&self) -> Option<&Frame> {
         Some(&self.frame)
     }

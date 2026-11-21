@@ -25,6 +25,9 @@ pub(crate) enum DesktopUpdate {
 /// Backends own their framebuffers. Every partial update must be applied before
 /// reporting a change; the viewer may then render only the latest complete buffer.
 pub(crate) trait DesktopBackend {
+    /// Short ASCII label for the frame, defined by the backend rather than the server.
+    fn frame_title(&self) -> &'static str;
+
     fn frame(&self) -> Option<&Frame>;
 
     /// Push-driven sources override this. Polling sources refresh on a timer.
@@ -71,7 +74,7 @@ where
     T: Stream<Item = ()>,
 {
     let result = async {
-        let mut viewer = Viewer::open(io, render)?;
+        let mut viewer = Viewer::open(io, render, desktop.frame_title())?;
         let (events, ticks) = sources();
         let result = drive(&mut desktop, &mut viewer, events, ticks).await;
         if let Some(release) = viewer.reset_pointer() {

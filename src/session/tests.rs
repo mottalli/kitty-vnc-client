@@ -89,6 +89,10 @@ struct FakeDesktop {
 }
 
 impl DesktopBackend for FakeDesktop {
+    fn frame_title(&self) -> &'static str {
+        "Test Driver"
+    }
+
     fn frame(&self) -> Option<&Frame> {
         Some(&self.frame)
     }
@@ -243,11 +247,11 @@ async fn toolbar_controls_redraw_locally_and_close_without_forwarding_clicks() {
     let (result, trace) = play(
         [Step::Refresh]
             .into_iter()
-            .chain(click(21, 0)) // Fit / Fill
+            .chain(click(27, 0)) // Fit / Fill
             .chain([Step::Refresh])
-            .chain(click(5, 0)) // Smooth
+            .chain(click(11, 0)) // Smooth
             .chain([Step::Refresh])
-            .chain(click(30, 0)), // Close
+            .chain(click(36, 0)), // Close
     )
     .await;
     result.unwrap();
@@ -256,6 +260,7 @@ async fn toolbar_controls_redraw_locally_and_close_without_forwarding_clicks() {
     assert!(output.contains("[ Fit  ]"));
     assert!(output.contains("[ Fill ]"));
     assert!(output.contains("[ Smooth: off ]"));
+    assert!(output.contains("[X]"));
     assert_eq!(
         script.observed,
         [
@@ -285,6 +290,8 @@ async fn pane_resize_redraws_a_static_frame_and_updates_mouse_mapping() {
     let script = trace.borrow();
     let output = String::from_utf8_lossy(&script.output);
     assert_eq!(output.matches("\x1b[2J").count(), 2);
+    assert!(output.contains("╭ Test Driver "));
+    assert!(!output.contains("╭ VNC "));
     assert!(output.contains("\x1b[5;2H\x1b[38;2;"));
     assert!(output.contains("\x1b[4;2H\x1b[38;2;"));
     assert_eq!(

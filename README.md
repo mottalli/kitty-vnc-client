@@ -66,7 +66,7 @@ to cover the inside of the frame without cropping. Click
 nearest-neighbor scaling. Neither mode alters the image at native size.
 Mouse movement, clicks,
 drags, scrolling, and common keyboard shortcuts go to the remote desktop.
-**Click Close or press F12** to exit locally.
+Click **`[X]`** or press **F12** to exit locally.
 
 ## Text rendering
 

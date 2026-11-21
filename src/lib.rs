@@ -17,7 +17,7 @@ use terminal::Sampling;
 pub use cli::{ConnectionTarget, ViewerArgs, parse_viewer_args};
 pub use session::require_terminal;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum RenderMode {
     #[default]
     Kitty,

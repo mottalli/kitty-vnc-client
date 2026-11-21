@@ -17,10 +17,10 @@ use crate::{Frame, FrameRegion, RenderMode};
 
 const DEFAULT_PORT: NonZeroU16 = NonZeroU16::new(5901).unwrap();
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct VncEndpoint(VncAddress);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum VncAddress {
     Ip(SocketAddr),
     Named { host: String, port: NonZeroU16 },
@@ -92,10 +92,10 @@ impl VncEndpoint {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct VncUsername(String);
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct VncTarget {
     endpoint: VncEndpoint,
     username: Option<VncUsername>,
@@ -260,6 +260,10 @@ impl VncDesktop {
 }
 
 impl DesktopBackend for VncDesktop {
+    fn frame_title(&self) -> &'static str {
+        "VNC"
+    }
+
     fn frame(&self) -> Option<&Frame> {
         self.frame.as_ref()
     }

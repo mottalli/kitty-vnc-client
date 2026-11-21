@@ -7,7 +7,7 @@ use x11rb_protocol::xauth::{Family, get_auth};
 
 const MIT_COOKIE: &[u8] = b"MIT-MAGIC-COOKIE-1";
 
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum X11Authority {
     #[default]
     Environment,

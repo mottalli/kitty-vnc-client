@@ -194,6 +194,7 @@ mod tests {
             };
             let before = Chrome {
                 pane,
+                title: "Test Driver",
                 options: RenderOptions {
                     scale: old_scale,
                     ..options
@@ -202,7 +203,7 @@ mod tests {
             let mut output = Vec::new();
             renderer()
                 .draw(
-                    RenderSurface::new(&mut output, Chrome { pane, options }, Some(before)),
+                    RenderSurface::new(&mut output, Chrome { options, ..before }, Some(before)),
                     Some(&frame),
                 )
                 .unwrap();
@@ -222,6 +223,7 @@ mod tests {
         let before = Chrome {
             pane: pane(40, 20, 320, 320),
             options: RenderOptions::default(),
+            title: "Test Driver",
         };
         let current = Chrome {
             pane: pane(30, 20, 240, 320),
@@ -362,10 +364,10 @@ mod tests {
         assert_eq!(place.viewport().point(2, 1, false), None);
         let options = RenderOptions::default();
         assert_eq!(
-            pane.control_at(70, 0, options),
+            pane.control_at(76, 0, options),
             Some(super::super::Control::Close)
         );
-        assert_eq!(pane.control_at(70, 1, options), None);
+        assert_eq!(pane.control_at(76, 1, options), None);
 
         let fill = KittyPlacement::new(pane, desktop, ScaleMode::Fill).unwrap();
         assert_eq!(

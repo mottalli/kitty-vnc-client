@@ -23,8 +23,8 @@ pub(crate) struct Viewer<I: TerminalIo> {
 }
 
 impl<I: TerminalIo> Viewer<I> {
-    pub(crate) fn open(io: I, mode: RenderMode) -> io::Result<Self> {
-        let mut terminal = Terminal::open(io, mode)?;
+    pub(crate) fn open(io: I, mode: RenderMode, title: &'static str) -> io::Result<Self> {
+        let mut terminal = Terminal::open(io, mode, title)?;
         let pane = terminal.pane()?;
         let options = RenderOptions::default();
         let viewport = terminal.draw(pane, None, options)?;
