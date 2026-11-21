@@ -351,6 +351,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "gui-connect"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "crossterm",
+ "fast_image_resize",
+ "flate2",
+ "futures-util",
+ "rpassword",
+ "tokio",
+ "vnc-rs",
+ "x11rb",
+ "x11rb-protocol",
+]
+
+[[package]]
 name = "inout"
 version = "0.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -671,23 +688,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "terminal-vnc-kitty"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64",
- "crossterm",
- "fast_image_resize",
- "flate2",
- "futures-util",
- "rpassword",
- "tokio",
- "vnc-rs",
- "x11rb",
- "x11rb-protocol",
 ]
 
 [[package]]

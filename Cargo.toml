@@ -1,8 +1,7 @@
 [package]
-name = "terminal-vnc-kitty"
+name = "gui-connect"
 version = "0.1.0"
 edition = "2024"
-default-run = "terminal-vnc-kitty"
 
 [dependencies]
 anyhow = "1"

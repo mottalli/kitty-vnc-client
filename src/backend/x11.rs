@@ -1,53 +1,136 @@
-use std::io::{self, IsTerminal};
+mod authority;
+
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
-use std::time::Duration;
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::{net::Ipv6Addr, str::FromStr};
 
 use anyhow::{Context, Result, ensure};
-use crossterm::event::{EventStream, KeyEvent, KeyModifiers};
-use futures_util::StreamExt;
-use terminal_vnc_kitty::{
-    Frame, KEY_MODIFIERS, PointerUpdate, Viewer, ViewerEvent, key_tap, parse_viewer_args,
-};
-use tokio::time::{self, MissedTickBehavior};
+use crossterm::event::KeyModifiers;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageOrder, VisualClass};
 use x11rb::protocol::xtest::ConnectionExt as _;
-#[cfg(unix)]
-use x11rb::rust_connection::DefaultStream;
-use x11rb::rust_connection::RustConnection;
-#[cfg(unix)]
-use x11rb_protocol::xauth::get_auth;
+use x11rb::rust_connection::{DefaultStream, RustConnection};
+use x11rb_protocol::parse_display::{ParsedDisplay, parse_display};
 
-fn connect_x11(display: Option<&str>) -> Result<(RustConnection, usize)> {
+pub use authority::X11Authority;
+use authority::{Authorization, DefaultLookup};
+
+use crate::input::{
+    ButtonSet, DesktopInput, KEY_MODIFIERS, KeyTap, PointerButton, PointerUpdate, ScrollDirection,
+};
+use crate::session::{self, DesktopBackend, DesktopUpdate};
+use crate::{Frame, RenderMode};
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct X11Target(X11Address);
+
+#[derive(Debug, Default, PartialEq, Eq)]
+enum X11Address {
+    #[default]
+    Environment,
+    Display(ParsedDisplay),
     #[cfg(unix)]
-    {
-        let from_env = std::env::var("DISPLAY").ok();
-        if let Some(path) = display
-            .or(from_env.as_deref())
-            .filter(|arg| arg.starts_with('/'))
+    UnixSocket(PathBuf),
+}
+
+impl FromStr for X11Target {
+    type Err = anyhow::Error;
+
+    fn from_str(name: &str) -> Result<Self> {
+        #[cfg(unix)]
+        if name.starts_with('/') {
+            return Ok(Self(X11Address::UnixSocket(PathBuf::from(name))));
+        }
+        ensure!(
+            !name.contains(['@', '?', '#']) && !name.contains(char::is_whitespace),
+            "invalid X11 display; use [HOST]:DISPLAY[.SCREEN] or an absolute socket path"
+        );
+        let mut display = parse_display(Some(name)).context("invalid X11 display")?;
+        if let Some(host) = display
+            .host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
         {
-            // x11rb's normal connector resolves Unix displays to /tmp/.X11-unix.
-            // Open custom paths ourselves while keeping the standard Xauthority lookup.
-            let stream = UnixStream::connect(path)
-                .with_context(|| format!("could not open X11 socket {path}"))?;
-            let (stream, (family, address)) = DefaultStream::from_unix_stream(stream)?;
-            let auth = match get_auth(family, &address, 0) {
-                Err(error)
-                    if error.kind() == io::ErrorKind::NotFound
-                        && std::env::var_os("XAUTHORITY").is_none() =>
-                {
-                    None
-                }
-                result => result.context("could not read X11 authorization")?,
-            };
-            let (name, data) = auth.unwrap_or_default();
-            let conn = RustConnection::connect_to_stream_with_auth_info(stream, 0, name, data)
-                .context("X11 setup failed on the Unix socket (check XAUTHORITY for display 0)")?;
-            return Ok((conn, 0));
+            display.host = host
+                .parse::<Ipv6Addr>()
+                .context("invalid IPv6 X11 host")?
+                .to_string();
+        }
+        ensure!(
+            display.protocol.as_deref() == Some("unix") || display.display <= u16::MAX - 6000,
+            "X11 display number is too large for a TCP port"
+        );
+        Ok(Self(X11Address::Display(display)))
+    }
+}
+
+impl X11Target {
+    fn connect(self, authority: &X11Authority) -> Result<(RustConnection, usize)> {
+        match self.0 {
+            X11Address::Environment => {
+                let display = std::env::var("DISPLAY")
+                    .context("could not read DISPLAY; specify an X display or socket path")?;
+                display.parse::<Self>()?.connect(authority)
+            }
+            X11Address::Display(display) => connect_display(display, authority)
+                .context("could not connect to X11 (check DISPLAY and X11 authorization)"),
+            #[cfg(unix)]
+            X11Address::UnixSocket(path) => {
+                // An explicit path may be a mounted socket, not an entry in /tmp/.X11-unix.
+                let stream = UnixStream::connect(&path)
+                    .with_context(|| format!("could not open X11 socket {}", path.display()))?;
+                let (stream, (family, address)) = DefaultStream::from_unix_stream(stream)?;
+                let Authorization { name, data } =
+                    authority.lookup(family, &address, 0, DefaultLookup::CheckFile)?;
+                let conn = RustConnection::connect_to_stream_with_auth_info(stream, 0, name, data)
+                    .context(
+                        "X11 setup failed on the Unix socket (check authorization for display 0)",
+                    )?;
+                Ok((conn, 0))
+            }
         }
     }
-    x11rb::connect(display).context("could not connect to X11 (check DISPLAY and XAUTHORITY)")
+}
+
+fn connect_display(
+    display: ParsedDisplay,
+    authority: &X11Authority,
+) -> Result<(RustConnection, usize)> {
+    let screen = usize::from(display.screen);
+    let mut last_error = None;
+    for target in display.connect_instruction() {
+        match DefaultStream::connect(&target) {
+            Ok((stream, (family, address))) => {
+                let Authorization { name, data } = authority.lookup(
+                    family,
+                    &address,
+                    display.display,
+                    DefaultLookup::BestEffort,
+                )?;
+                return Ok((
+                    RustConnection::connect_to_stream_with_auth_info(stream, screen, name, data)?,
+                    screen,
+                ));
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+    match last_error {
+        Some(err) => Err(err.into()),
+        None => anyhow::bail!("no connection address for X11 display"),
+    }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct X11Connection {
+    pub target: X11Target,
+    pub authority: X11Authority,
+}
+
+pub async fn run(connection: X11Connection, render: RenderMode) -> Result<()> {
+    session::run(XDisplay::connect(connection)?, render).await
 }
 
 struct PixelFormat {
@@ -119,12 +202,14 @@ struct XDisplay {
     height: u16,
     format: PixelFormat,
     keymap: Keymap,
-    buttons: u8,
+    buttons: ButtonSet,
+    frame: Frame,
+    last_image: Vec<u8>,
 }
 
 impl XDisplay {
-    fn connect(display: Option<&str>) -> Result<Self> {
-        let (conn, screen) = connect_x11(display)?;
+    fn connect(X11Connection { target, authority }: X11Connection) -> Result<Self> {
+        let (conn, screen) = target.connect(&authority)?;
         conn.xtest_get_version(2, 2)?
             .reply()
             .context("X server needs XTEST for mouse and keyboard input")?;
@@ -188,11 +273,13 @@ impl XDisplay {
             height,
             format,
             keymap,
-            buttons: 0,
+            buttons: ButtonSet::default(),
+            frame: Frame::new(width, height),
+            last_image: Vec::new(),
         })
     }
 
-    fn capture(&self, frame: &mut Frame, last: &mut Vec<u8>) -> Result<bool> {
+    fn capture(&mut self) -> Result<bool> {
         let image = self
             .conn
             .get_image(
@@ -206,12 +293,16 @@ impl XDisplay {
             )?
             .reply()
             .context("could not capture the X11 root window")?;
-        if image.data == *last {
+        if image.data == self.last_image {
             return Ok(false);
         }
-        self.format
-            .decode(self.width.into(), self.height.into(), &image.data, frame)?;
-        *last = image.data;
+        self.format.decode(
+            self.width.into(),
+            self.height.into(),
+            &image.data,
+            &mut self.frame,
+        )?;
+        self.last_image = image.data;
         Ok(true)
     }
 
@@ -229,31 +320,44 @@ impl XDisplay {
             update.x as i16,
             update.y as i16,
         )?;
-        for bit in 0..3 {
-            let mask = 1 << bit;
-            if (self.buttons ^ update.buttons) & mask != 0 {
-                let event = if update.buttons & mask != 0 {
+        for button in PointerButton::ALL {
+            let pressed = update.buttons.contains(button);
+            if self.buttons.contains(button) != pressed {
+                let event = if pressed {
                     xproto::BUTTON_PRESS_EVENT
                 } else {
                     xproto::BUTTON_RELEASE_EVENT
                 };
-                self.fake_input(event, bit + 1, 0, 0)?;
-                self.buttons ^= mask;
+                let detail = match button {
+                    PointerButton::Left => 1,
+                    PointerButton::Middle => 2,
+                    PointerButton::Right => 3,
+                };
+                self.fake_input(event, detail, 0, 0)?;
+                self.buttons.set(button, pressed);
             }
         }
-        if update.wheel != 0 {
-            let button = update.wheel.trailing_zeros() as u8 + 1;
+        if let Some(direction) = update.scroll {
+            let button = match direction {
+                ScrollDirection::Up => 4,
+                ScrollDirection::Down => 5,
+                ScrollDirection::Left => 6,
+                ScrollDirection::Right => 7,
+            };
             self.fake_input(xproto::BUTTON_PRESS_EVENT, button, 0, 0)?;
             self.fake_input(xproto::BUTTON_RELEASE_EVENT, button, 0, 0)?;
         }
         Ok(())
     }
 
-    fn key(&self, event: KeyEvent) -> Result<()> {
-        let Some((symbol, mut modifiers)) = key_tap(event) else {
-            return Ok(());
-        };
-        let Some((code, shifted)) = self.keymap.find(symbol) else {
+    fn key(
+        &self,
+        KeyTap {
+            keysym,
+            mut modifiers,
+        }: KeyTap,
+    ) -> Result<()> {
+        let Some((code, shifted)) = self.keymap.find(keysym) else {
             return Ok(());
         };
         if shifted {
@@ -276,54 +380,57 @@ impl XDisplay {
     }
 }
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<()> {
-    let args: Vec<_> = std::env::args().skip(1).collect();
-    let Some(args) = parse_viewer_args(&args)? else {
-        println!(
-            "Usage: kitty-x11 [--render kitty|text] [DISPLAY|SOCKET_PATH]\nDefaults to $DISPLAY and uses your X11 authorization.\n--render selects kitty (default) or text (colored UTF-8).\nAn absolute Unix socket path uses screen 0 and looks up display 0 in XAUTHORITY.\nClick Close or press F12 to exit."
-        );
-        return Ok(());
-    };
-    ensure!(
-        io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "run this directly in an interactive terminal pane"
-    );
-    let mut x = XDisplay::connect(args.target)?;
-    let mut frame = Frame::new(x.width, x.height);
-    let mut last_image = Vec::new();
-    let mut viewer = Viewer::open(args.render)?;
-    let mut events = EventStream::new();
-    let mut tick = time::interval(Duration::from_millis(100));
-    tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    let result = async {
-        loop {
-            tokio::select! {
-                event = events.next() => match viewer.handle(event.context("terminal input closed")??) {
-                    ViewerEvent::Quit => return Ok(()),
-                    ViewerEvent::Pointer(update) => x.pointer(update)?,
-                    ViewerEvent::Key(key) => x.key(key)?,
-                    ViewerEvent::None => {},
-                },
-                _ = tick.tick() => {
-                    let changed = x.capture(&mut frame, &mut last_image)?;
-                    if let Some(update) = viewer.render(Some(&frame), changed)? {
-                        x.pointer(update)?;
-                    }
-                }
-            }
-        }
-    }.await;
-    if let Some(update) = viewer.reset_pointer() {
-        let _ = x.pointer(update);
+impl DesktopBackend for XDisplay {
+    fn frame(&self) -> Option<&Frame> {
+        Some(&self.frame)
     }
-    result
+
+    async fn refresh(&mut self) -> Result<DesktopUpdate> {
+        Ok(if self.capture()? {
+            DesktopUpdate::FrameChanged
+        } else {
+            DesktopUpdate::Unchanged
+        })
+    }
+
+    async fn send_input(&mut self, input: DesktopInput) -> Result<()> {
+        match input {
+            DesktopInput::Key(key) => self.key(key),
+            DesktopInput::Pointer(pointer) => self.pointer(pointer),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinguishes_display_address_components_and_rejects_invalid_displays() {
+        let X11Address::Display(display) = "localhost:12.1".parse::<X11Target>().unwrap().0 else {
+            panic!("expected a display address");
+        };
+        assert_eq!(display.host, "localhost");
+        assert_eq!(display.display, 12);
+        assert_eq!(display.screen, 1);
+        let X11Address::Display(ipv6) = "[::1]:99".parse::<X11Target>().unwrap().0 else {
+            panic!("expected an IPv6 display address");
+        };
+        assert_eq!(ipv6.host, "::1");
+        for display in ["localhost", "localhost:65535", "alice@localhost:1"] {
+            assert!(display.parse::<X11Target>().is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keeps_an_explicit_socket_path_even_before_the_socket_exists() {
+        let path = "/tmp/shared-display/X1";
+        assert_eq!(
+            path.parse::<X11Target>().unwrap(),
+            X11Target(X11Address::UnixSocket(PathBuf::from(path)))
+        );
+    }
 
     #[test]
     fn decodes_x11_padding_byte_order_and_component_masks() {
