@@ -4,21 +4,18 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail, ensure};
 use crossterm::event::{EventStream, KeyEvent};
 use futures_util::StreamExt;
-use terminal_vnc_kitty::{Frame, KEY_MODIFIERS, PointerUpdate, Viewer, ViewerEvent, key_tap};
+use terminal_vnc_kitty::{
+    Frame, KEY_MODIFIERS, PointerUpdate, RenderMode, Viewer, ViewerEvent, key_tap,
+    parse_viewer_args,
+};
 use tokio::net::TcpStream;
 use tokio::time::{self, MissedTickBehavior};
 use vnc::{PixelFormat, VncClient, VncConnector, VncEncoding, VncError, VncEvent, X11Event};
 
 const DEFAULT_SERVER: &str = "127.0.0.1:5901";
 
-fn server_arg(args: &[String]) -> Result<Option<&str>> {
-    let address = match args {
-        [] => DEFAULT_SERVER,
-        [arg] if matches!(arg.as_str(), "-h" | "--help") => return Ok(None),
-        [address] if !address.starts_with('-') => address,
-        _ => bail!("expected a single HOST:PORT argument (see --help)"),
-    };
-
+fn server_address(target: Option<&str>) -> Result<&str> {
+    let address = target.unwrap_or(DEFAULT_SERVER);
     ensure!(
         address.rsplit_once(':').is_some_and(|(host, port)| {
             !host.is_empty()
@@ -28,7 +25,7 @@ fn server_arg(args: &[String]) -> Result<Option<&str>> {
         }),
         "invalid server address; expected HOST:PORT (use [IPv6]:PORT for IPv6)"
     );
-    Ok(Some(address))
+    Ok(address)
 }
 
 async fn send_pointer(client: &VncClient, update: PointerUpdate) -> Result<(), VncError> {
@@ -73,8 +70,8 @@ async fn send_key(client: &VncClient, key: KeyEvent) -> Result<(), VncError> {
     Ok(())
 }
 
-async fn view(client: &VncClient) -> Result<()> {
-    let mut viewer = Viewer::open()?;
+async fn view(client: &VncClient, render: RenderMode) -> Result<()> {
+    let mut viewer = Viewer::open(render)?;
     let mut events = EventStream::new();
     let mut tick = time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -125,16 +122,17 @@ async fn view(client: &VncClient) -> Result<()> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     let args: Vec<_> = std::env::args().skip(1).collect();
-    let Some(address) = server_arg(&args)? else {
+    let Some(args) = parse_viewer_args(&args)? else {
         println!(
-            "Usage: {} [HOST:PORT]\n\n  HOST:PORT   VNC server (default: {DEFAULT_SERVER})\n  -h, --help  Show this help\n\nUses VNC_PASSWORD if set, otherwise prompts.\nClick Close or press F12 to exit.",
+            "Usage: {} [--render kitty|text] [HOST:PORT]\n\n  HOST:PORT         VNC server (default: {DEFAULT_SERVER})\n  --render MODE     kitty (default) or text (colored UTF-8)\n  -h, --help        Show this help\n\nUses VNC_PASSWORD if set, otherwise prompts.\nClick Close or press F12 to exit.",
             env!("CARGO_PKG_NAME"),
         );
         return Ok(());
     };
+    let address = server_address(args.target)?;
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "run this directly in a Kitty graphics-compatible terminal pane"
+        "run this directly in an interactive terminal pane"
     );
 
     let password = match std::env::var("VNC_PASSWORD") {
@@ -162,7 +160,7 @@ async fn main() -> Result<()> {
     .await
     .context("timed out connecting to the VNC server")??;
 
-    let result = view(&client).await;
+    let result = view(&client, args.render).await;
     let _ = time::timeout(Duration::from_secs(1), client.close()).await;
     result
 }
@@ -172,30 +170,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_positional_server_and_default() {
-        for (args, expected) in [
-            (&[][..], Some("127.0.0.1:5901")),
-            (&["desktop.local:5902"][..], Some("desktop.local:5902")),
-            (&["[::1]:5903"][..], Some("[::1]:5903")),
-            (&["--help"][..], None),
-        ] {
-            let args: Vec<_> = args.iter().map(|arg| arg.to_string()).collect();
-            assert_eq!(server_arg(&args).unwrap(), expected);
+    fn parses_server_address_and_default() {
+        assert_eq!(server_address(None).unwrap(), "127.0.0.1:5901");
+        for addr in ["desktop.local:5902", "[::1]:5903"] {
+            assert_eq!(server_address(Some(addr)).unwrap(), addr);
         }
     }
 
     #[test]
     fn rejects_invalid_server_arguments() {
-        for args in [
-            &["--server", "localhost:5901"][..],
-            &["localhost"][..],
-            &["localhost:65536"][..],
-            &["::1:5901"][..],
-            &["localhost:5901", "localhost:5902"][..],
-            &["--unknown"][..],
-        ] {
-            let args: Vec<_> = args.iter().map(|arg| arg.to_string()).collect();
-            assert!(server_arg(&args).is_err());
+        for addr in ["localhost", "localhost:65536", "::1:5901"] {
+            assert!(server_address(Some(addr)).is_err());
         }
     }
 }

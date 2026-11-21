@@ -3,7 +3,7 @@ mod terminal;
 
 use std::io;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, MouseButton, MouseEventKind};
 use fast_image_resize::{
     FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
@@ -12,6 +12,48 @@ use fast_image_resize::{
 use terminal::{Control, Pane, RenderOptions, Sampling, Terminal, Viewport};
 
 pub use input::{KEY_MODIFIERS, key_tap};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RenderMode {
+    #[default]
+    Kitty,
+    Text,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ViewerArgs<'a> {
+    pub target: Option<&'a str>,
+    pub render: RenderMode,
+}
+
+pub fn parse_viewer_args(args: &[String]) -> Result<Option<ViewerArgs<'_>>> {
+    let mut parsed = ViewerArgs::default();
+    let mut render = None;
+    let mut args = args.iter().map(String::as_str);
+    while let Some(arg) = args.next() {
+        let value = match arg {
+            "-h" | "--help" => return Ok(None),
+            "--render" => args.next().context("--render requires kitty or text")?,
+            arg if arg.starts_with("--render=") => &arg["--render=".len()..],
+            arg if arg.starts_with('-') => bail!("unknown option {arg} (see --help)"),
+            target => {
+                ensure!(
+                    parsed.target.replace(target).is_none(),
+                    "expected at most one connection target (see --help)"
+                );
+                continue;
+            }
+        };
+        ensure!(render.is_none(), "specify --render only once");
+        render = Some(match value {
+            "kitty" => RenderMode::Kitty,
+            "text" => RenderMode::Text,
+            _ => bail!("invalid render mode {value:?}; use kitty or text"),
+        });
+    }
+    parsed.render = render.unwrap_or_default();
+    Ok(Some(parsed))
+}
 
 pub struct Frame {
     width: usize,
@@ -119,8 +161,8 @@ pub struct Viewer {
 }
 
 impl Viewer {
-    pub fn open() -> io::Result<Self> {
-        let mut terminal = Terminal::open()?;
+    pub fn open(mode: RenderMode) -> io::Result<Self> {
+        let mut terminal = Terminal::open(mode)?;
         let pane = terminal.pane()?;
         let options = RenderOptions::default();
         let viewport = terminal.draw(pane, None, options)?;
@@ -213,6 +255,50 @@ impl Viewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_option_keeps_the_positional_connection_target() {
+        for (input, target, render) in [
+            (&[][..], None, RenderMode::Kitty),
+            (&["--render", "text"][..], None, RenderMode::Text),
+            (
+                &["--render", "text", ":99"][..],
+                Some(":99"),
+                RenderMode::Text,
+            ),
+            (
+                &["desktop.local:5902", "--render=text"][..],
+                Some("desktop.local:5902"),
+                RenderMode::Text,
+            ),
+            (
+                &["--render=kitty", "/tmp/display/X1"][..],
+                Some("/tmp/display/X1"),
+                RenderMode::Kitty,
+            ),
+        ] {
+            let args: Vec<_> = input.iter().map(|arg| arg.to_string()).collect();
+            assert_eq!(
+                parse_viewer_args(&args).unwrap(),
+                Some(ViewerArgs { target, render })
+            );
+        }
+        assert!(parse_viewer_args(&["--help".into()]).unwrap().is_none());
+    }
+
+    #[test]
+    fn rejects_bad_render_arguments() {
+        for input in [
+            &["--render"][..],
+            &["--render=sixel"][..],
+            &["--render=text", "--render=kitty"][..],
+            &[":98", ":99"][..],
+            &["--server", "localhost:5901"][..],
+        ] {
+            let args: Vec<_> = input.iter().map(|arg| arg.to_string()).collect();
+            assert!(parse_viewer_args(&args).is_err());
+        }
+    }
 
     #[test]
     fn applies_rectangles_and_ignores_pixel_padding() {

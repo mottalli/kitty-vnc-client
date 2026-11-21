@@ -27,6 +27,23 @@ Mouse movement, clicks,
 drags, scrolling, and common keyboard shortcuts go to the remote desktop.
 **Click Close or press F12** to exit locally.
 
+## Text rendering
+
+Kitty graphics are the default. To use colored UTF-8 half-blocks instead,
+pass `--render text` to either viewer:
+
+```sh
+cargo run --release -- --render text
+cargo run --release --bin kitty-x11 -- --render text :99
+```
+
+Text mode uses 24-bit terminal colors and the `▀` character for two image
+samples per cell. It doesn't require Kitty graphics support. Fit / Fill,
+smoothing, and mouse and keyboard input still work, but mouse coordinates
+are limited to cells and small desktop text may be hard to read.
+
+## VNC notes
+
 This proof of concept uses standard VNC password authentication and does not
 encrypt the session. Keep it on loopback, or use an SSH tunnel for a remote
 server. It redraws the whole Kitty image when the framebuffer changes. Mouse

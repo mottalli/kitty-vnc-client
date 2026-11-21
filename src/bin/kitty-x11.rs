@@ -6,7 +6,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, ensure};
 use crossterm::event::{EventStream, KeyEvent, KeyModifiers};
 use futures_util::StreamExt;
-use terminal_vnc_kitty::{Frame, KEY_MODIFIERS, PointerUpdate, Viewer, ViewerEvent, key_tap};
+use terminal_vnc_kitty::{
+    Frame, KEY_MODIFIERS, PointerUpdate, Viewer, ViewerEvent, key_tap, parse_viewer_args,
+};
 use tokio::time::{self, MissedTickBehavior};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{self, ConnectionExt as _, ImageOrder, VisualClass};
@@ -276,26 +278,21 @@ impl XDisplay {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
-    let display = args.next();
-    if matches!(display.as_deref(), Some("-h" | "--help")) {
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let Some(args) = parse_viewer_args(&args)? else {
         println!(
-            "Usage: kitty-x11 [DISPLAY|SOCKET_PATH]\nDefaults to $DISPLAY and uses your X11 authorization.\nAn absolute Unix socket path uses screen 0 and looks up display 0 in XAUTHORITY.\nClick Close or press F12 to exit."
+            "Usage: kitty-x11 [--render kitty|text] [DISPLAY|SOCKET_PATH]\nDefaults to $DISPLAY and uses your X11 authorization.\n--render selects kitty (default) or text (colored UTF-8).\nAn absolute Unix socket path uses screen 0 and looks up display 0 in XAUTHORITY.\nClick Close or press F12 to exit."
         );
         return Ok(());
-    }
-    ensure!(
-        args.next().is_none() && !display.as_deref().is_some_and(|arg| arg.starts_with('-')),
-        "expected an X display or absolute socket path (see --help)"
-    );
+    };
     ensure!(
         io::stdin().is_terminal() && io::stdout().is_terminal(),
-        "run this directly in a Kitty graphics-compatible terminal pane"
+        "run this directly in an interactive terminal pane"
     );
-    let mut x = XDisplay::connect(display.as_deref())?;
+    let mut x = XDisplay::connect(args.target)?;
     let mut frame = Frame::new(x.width, x.height);
     let mut last_image = Vec::new();
-    let mut viewer = Viewer::open()?;
+    let mut viewer = Viewer::open(args.render)?;
     let mut events = EventStream::new();
     let mut tick = time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);

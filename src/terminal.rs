@@ -1,10 +1,13 @@
+mod text;
+
 use std::io::{self, Stdout, Write};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use crossterm::{cursor, execute, terminal};
 use flate2::{Compression, write::ZlibEncoder};
 
-use crate::Frame;
+use crate::{Frame, RenderMode};
+use text::{CellRect, TextRenderer};
 
 const CLOSE_LABEL: &str = "[ Close ]";
 
@@ -230,17 +233,8 @@ impl Viewport {
         let cols = pane.cols - 2;
         let rows = pane.rows - 2;
         let (max_width, max_height) = (cols * pane.cell_width, rows * pane.cell_height);
-        let (width, height) = match scale {
-            ScaleMode::Fill => (max_width, max_height),
-            ScaleMode::Fit if max_width * desktop_height <= max_height * desktop_width => (
-                max_width,
-                (max_width * desktop_height / desktop_width).max(1),
-            ),
-            ScaleMode::Fit => (
-                (max_height * desktop_width / desktop_height).max(1),
-                max_height,
-            ),
-        };
+        let (width, height) =
+            fit_dimensions(max_width, max_height, desktop_width, desktop_height, scale);
         let (left, top, cells) = if pane.pixels {
             (
                 pane.cell_width + (max_width - width) / 2,
@@ -265,6 +259,44 @@ impl Viewport {
             desktop_height,
             cells,
         })
+    }
+
+    fn for_text(
+        pane: Pane,
+        desktop_width: usize,
+        desktop_height: usize,
+        scale: ScaleMode,
+    ) -> Option<(Self, CellRect)> {
+        if pane.cols < 3 || pane.rows < 3 {
+            return None;
+        }
+        let (cols, rows) = (pane.cols - 2, pane.rows - 2);
+        let (width, height) = fit_dimensions(
+            cols * pane.cell_width,
+            rows * pane.cell_height,
+            desktop_width,
+            desktop_height,
+            scale,
+        );
+        // Fit in physical units first, then round to the nearest whole cell.
+        let image_cols = ((width + pane.cell_width / 2) / pane.cell_width).clamp(1, cols);
+        let image_rows = ((height + pane.cell_height / 2) / pane.cell_height).clamp(1, rows);
+        let rect = CellRect {
+            col: 1 + (cols - image_cols) / 2,
+            row: 1 + (rows - image_rows) / 2,
+            cols: image_cols,
+            rows: image_rows,
+        };
+        let view = Self {
+            left: rect.col,
+            top: rect.row,
+            width: rect.cols,
+            height: rect.rows * 2,
+            desktop_width,
+            desktop_height,
+            cells: Some((rect.cols, rect.rows)),
+        };
+        Some((view, rect))
     }
 
     pub(crate) fn point(self, column: u16, row: u16, clamp: bool) -> Option<(u16, u16)> {
@@ -308,22 +340,51 @@ impl Viewport {
     }
 }
 
+fn fit_dimensions(
+    max_width: usize,
+    max_height: usize,
+    desktop_width: usize,
+    desktop_height: usize,
+    scale: ScaleMode,
+) -> (usize, usize) {
+    match scale {
+        ScaleMode::Fill => (max_width, max_height),
+        ScaleMode::Fit if max_width * desktop_height <= max_height * desktop_width => (
+            max_width,
+            (max_width * desktop_height / desktop_width).max(1),
+        ),
+        ScaleMode::Fit => (
+            (max_height * desktop_width / desktop_height).max(1),
+            max_height,
+        ),
+    }
+}
+
+enum Renderer {
+    Kitty([u32; 2]),
+    Text(TextRenderer),
+}
+
 pub(crate) struct Terminal {
     out: Stdout,
-    image_ids: [u32; 2],
-    next: usize,
+    renderer: Renderer,
     mouse_mode: u16,
     painted: Option<(Pane, RenderOptions)>,
 }
 
 impl Terminal {
-    pub(crate) fn open() -> io::Result<Self> {
+    pub(crate) fn open(mode: RenderMode) -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        let id = (std::process::id() & 0x7fff_ffff).max(1) * 2;
+        let renderer = match mode {
+            RenderMode::Kitty => {
+                let id = (std::process::id() & 0x7fff_ffff).max(1) * 2;
+                Renderer::Kitty([id, id + 1])
+            }
+            RenderMode::Text => Renderer::Text(TextRenderer::default()),
+        };
         let mut screen = Self {
             out: io::stdout(),
-            image_ids: [id, id + 1],
-            next: 0,
+            renderer,
             mouse_mode: 1006,
             painted: None,
         };
@@ -339,7 +400,13 @@ impl Terminal {
     }
 
     pub(crate) fn pane(&self) -> io::Result<Pane> {
-        terminal::window_size().map(Pane::new)
+        let mut pane = Pane::new(terminal::window_size()?);
+        // Text mode targets terminals without graphics extensions. Keep the
+        // measured cell shape, but only request widely supported cell mouse reports.
+        if matches!(self.renderer, Renderer::Text(_)) {
+            pane.pixels = false;
+        }
+        Ok(pane)
     }
 
     pub(crate) fn draw(
@@ -348,29 +415,50 @@ impl Terminal {
         frame: Option<&Frame>,
         options: RenderOptions,
     ) -> io::Result<Option<Viewport>> {
-        let image = frame.and_then(|frame| {
-            Viewport::new(pane, frame.width, frame.height, options.scale).map(|view| (view, frame))
-        });
         let mut out = io::BufWriter::new(self.out.lock());
-        draw_frame(
-            &mut out,
-            pane,
-            options,
-            self.painted,
-            image,
-            [self.image_ids[self.next], self.image_ids[1 - self.next]],
-        )?;
+        let view = match &mut self.renderer {
+            Renderer::Kitty(ids) => {
+                let image = frame.and_then(|frame| {
+                    Viewport::new(pane, frame.width, frame.height, options.scale)
+                        .map(|view| (view, frame))
+                });
+                draw_frame(&mut out, pane, options, self.painted, image, *ids)?;
+                if image.is_some() {
+                    ids.swap(0, 1);
+                }
+                image.map(|(view, _)| view)
+            }
+            Renderer::Text(renderer) => {
+                let geometry = frame.and_then(|frame| {
+                    Viewport::for_text(pane, frame.width, frame.height, options.scale)
+                });
+                let image = match (frame, geometry) {
+                    (Some(frame), Some((view, rect))) => Some((
+                        rect,
+                        frame.scaled_rgb(view.width, view.height, options.sampling)?,
+                    )),
+                    _ => None,
+                };
+                write!(out, "\x1b[?2026h")?;
+                if self.painted.is_none_or(|(previous, _)| previous != pane) {
+                    pane.paint(&mut out, options)?;
+                    renderer.invalidate();
+                } else if self.painted != Some((pane, options)) {
+                    pane.paint_toggles(&mut out, options)?;
+                }
+                renderer.draw(&mut out, image)?;
+                write!(out, "\x1b[?2026l")?;
+                geometry.map(|(view, _)| view)
+            }
+        };
         self.painted = Some((pane, options));
-        if image.is_some() {
-            self.next = 1 - self.next;
-        }
         let mode = if pane.pixels { 1016 } else { 1006 };
         if mode != self.mouse_mode {
             write!(out, "\x1b[?{}l\x1b[?{mode}h", self.mouse_mode)?;
             self.mouse_mode = mode;
         }
         out.flush()?;
-        Ok(image.map(|(view, _)| view))
+        Ok(view)
     }
 }
 
@@ -434,14 +522,17 @@ fn upload(
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        // ST also terminates a graphics command interrupted by an I/O error.
+        if let Renderer::Kitty(ids) = self.renderer {
+            // ST also terminates a graphics command interrupted by an I/O error.
+            let _ = write!(self.out, "\x1b\\");
+            for id in ids {
+                let _ = write!(self.out, "\x1b_Ga=d,d=I,i={id},q=2;\x1b\\");
+            }
+        }
         let _ = write!(
             self.out,
-            "\x1b\\\x1b[?2026l\x1b[?1016l\x1b[?1006l\x1b[?1003l"
+            "\x1b[0m\x1b[?2026l\x1b[?1016l\x1b[?1006l\x1b[?1003l"
         );
-        for id in self.image_ids {
-            let _ = write!(self.out, "\x1b_Ga=d,d=I,i={id},q=2;\x1b\\");
-        }
         let _ = execute!(self.out, cursor::Show, terminal::LeaveAlternateScreen);
         let _ = terminal::disable_raw_mode();
     }
@@ -450,6 +541,43 @@ impl Drop for Terminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_fit_uses_cell_shape_and_maps_cell_center_clicks() {
+        let pane = Pane::new(terminal::WindowSize {
+            columns: 82,
+            rows: 42,
+            width: 820,
+            height: 1260,
+        });
+        let (view, rect) = Viewport::for_text(pane, 800, 600, ScaleMode::Fit).unwrap();
+        assert_eq!(
+            rect,
+            CellRect {
+                col: 1,
+                row: 11,
+                cols: 80,
+                rows: 20
+            }
+        );
+        assert_eq!((view.width, view.height), (80, 40));
+        assert_eq!(view.point(1, 11, false), Some((5, 15)));
+        assert_eq!(view.point(1, 10, false), None);
+
+        let (view, rect) = Viewport::for_text(pane, 800, 600, ScaleMode::Fill).unwrap();
+        assert_eq!(
+            rect,
+            CellRect {
+                col: 1,
+                row: 1,
+                cols: 80,
+                rows: 40
+            }
+        );
+        assert_eq!((view.width, view.height), (80, 80));
+        assert_eq!(view.point(80, 40, false), Some((795, 592)));
+        assert_eq!(view.point(80, 41, false), None);
+    }
 
     #[test]
     fn scale_toggle_replaces_image_without_clearing_the_screen() {
