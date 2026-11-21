@@ -21,7 +21,7 @@ use crate::input::{
     ButtonSet, DesktopInput, KEY_MODIFIERS, KeyTap, PointerButton, PointerUpdate, ScrollDirection,
 };
 use crate::session::{self, DesktopBackend, DesktopUpdate};
-use crate::{Frame, RenderMode};
+use crate::{Frame, ViewerOptions};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct X11Target(X11Address);
@@ -129,8 +129,8 @@ pub struct X11Connection {
     pub authority: X11Authority,
 }
 
-pub async fn run(connection: X11Connection, render: RenderMode) -> Result<()> {
-    session::run(XDisplay::connect(connection)?, render).await
+pub async fn run(connection: X11Connection, options: ViewerOptions) -> Result<()> {
+    session::run(XDisplay::connect(connection)?, options).await
 }
 
 struct PixelFormat {

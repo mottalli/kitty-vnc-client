@@ -12,7 +12,7 @@ use fast_image_resize::{
     FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer,
     images::{Image, ImageRef},
 };
-use terminal::Sampling;
+use terminal::{RenderOptions, Sampling};
 
 pub use cli::{ConnectionTarget, ViewerArgs, parse_viewer_args};
 pub use session::require_terminal;
@@ -22,6 +22,12 @@ pub enum RenderMode {
     #[default]
     Kitty,
     Text,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewerOptions {
+    pub(crate) render: RenderMode,
+    pub(crate) initial: RenderOptions,
 }
 
 pub struct Frame {

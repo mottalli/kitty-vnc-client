@@ -172,7 +172,7 @@ mod tests {
             width: 800,
             height: 600,
         };
-        let fit = TextPlacement::new(pane, desktop, ScaleMode::Fit).unwrap();
+        let fit = TextPlacement::new(pane, desktop, ScaleMode::Proportional).unwrap();
         assert_eq!(
             fit.cells,
             CellRect {
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(fit.viewport().point(1, 11, false), Some((5, 15)));
         assert_eq!(fit.viewport().point(1, 10, false), None);
 
-        let fill = TextPlacement::new(pane, desktop, ScaleMode::Fill).unwrap();
+        let fill = TextPlacement::new(pane, desktop, ScaleMode::Stretch).unwrap();
         assert_eq!(
             fill.cells,
             CellRect {

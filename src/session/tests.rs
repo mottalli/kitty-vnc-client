@@ -10,7 +10,9 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use crossterm::terminal::WindowSize;
 
 use super::*;
+use crate::RenderMode;
 use crate::input::PointerButton;
+use crate::terminal::{RenderOptions, Sampling, ScaleMode};
 
 enum Step {
     Input(Event),
@@ -178,6 +180,13 @@ fn ticks(trace: Trace) -> impl Stream<Item = ()> {
 }
 
 async fn play(steps: impl IntoIterator<Item = Step>) -> (Result<()>, Trace) {
+    play_with_options(steps, RenderOptions::default()).await
+}
+
+async fn play_with_options(
+    steps: impl IntoIterator<Item = Step>,
+    initial: RenderOptions,
+) -> (Result<()>, Trace) {
     let trace = Rc::new(RefCell::new(Script {
         steps: steps.into_iter().collect(),
         observed: Vec::new(),
@@ -195,7 +204,10 @@ async fn play(steps: impl IntoIterator<Item = Step>) -> (Result<()>, Trace) {
     let result = run_with(
         desktop,
         MemoryTerminal(trace.clone()),
-        RenderMode::Text,
+        ViewerOptions {
+            render: RenderMode::Text,
+            initial,
+        },
         || (inputs(trace.clone()), ticks(trace.clone())),
     )
     .await;
@@ -204,6 +216,36 @@ async fn play(steps: impl IntoIterator<Item = Step>) -> (Result<()>, Trace) {
         "session exited before the script finished"
     );
     (result, trace)
+}
+
+#[tokio::test]
+async fn startup_options_set_the_toolbar_and_frame_placement() {
+    for (initial, scale_label, smooth_label, image_start) in [
+        (
+            RenderOptions::default(),
+            "[ Fit=off ]",
+            "[ Smooth: on  ]",
+            "\x1b[5;2H\x1b[38;2;",
+        ),
+        (
+            RenderOptions {
+                scale: ScaleMode::Stretch,
+                sampling: Sampling::Nearest,
+            },
+            "[ Fit=on  ]",
+            "[ Smooth: off ]",
+            "\x1b[2;2H\x1b[38;2;",
+        ),
+    ] {
+        let (result, trace) = play_with_options([Step::Refresh, quit()], initial).await;
+        result.unwrap();
+        let script = trace.borrow();
+        let output = String::from_utf8_lossy(&script.output);
+        assert!(output.contains(scale_label));
+        assert!(output.contains(smooth_label));
+        assert!(output.contains(image_start));
+        assert_restored(&script);
+    }
 }
 
 fn mouse(kind: MouseEventKind, column: u16, row: u16) -> Step {
@@ -247,7 +289,7 @@ async fn toolbar_controls_redraw_locally_and_close_without_forwarding_clicks() {
     let (result, trace) = play(
         [Step::Refresh]
             .into_iter()
-            .chain(click(27, 0)) // Fit / Fill
+            .chain(click(27, 0)) // Fit
             .chain([Step::Refresh])
             .chain(click(11, 0)) // Smooth
             .chain([Step::Refresh])
@@ -257,8 +299,8 @@ async fn toolbar_controls_redraw_locally_and_close_without_forwarding_clicks() {
     result.unwrap();
     let script = trace.borrow();
     let output = String::from_utf8_lossy(&script.output);
-    assert!(output.contains("[ Fit  ]"));
-    assert!(output.contains("[ Fill ]"));
+    assert!(output.contains("[ Fit=off ]"));
+    assert!(output.contains("[ Fit=on  ]"));
     assert!(output.contains("[ Smooth: off ]"));
     assert!(output.contains("[X]"));
     assert_eq!(

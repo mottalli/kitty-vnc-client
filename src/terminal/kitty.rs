@@ -186,7 +186,7 @@ mod tests {
     fn scale_toggle_replaces_image_without_clearing_the_screen() {
         let pane = pane(40, 20, 320, 320);
         let frame = Frame::new(16, 10);
-        for old_scale in [ScaleMode::Fit, ScaleMode::Fill] {
+        for old_scale in [ScaleMode::Proportional, ScaleMode::Stretch] {
             let scale = old_scale.toggled();
             let options = RenderOptions {
                 scale,
@@ -253,7 +253,7 @@ mod tests {
                 width: 1600,
                 height: 900,
             },
-            ScaleMode::Fit,
+            ScaleMode::Proportional,
         )
         .unwrap();
         assert_eq!(
@@ -289,7 +289,7 @@ mod tests {
                 width: 1280,
                 height: 1024,
             },
-            ScaleMode::Fit,
+            ScaleMode::Proportional,
         )
         .unwrap();
         assert_eq!(
@@ -314,7 +314,7 @@ mod tests {
                 width: 600,
                 height: 800,
             },
-            ScaleMode::Fit,
+            ScaleMode::Proportional,
         )
         .unwrap();
         assert_eq!(
@@ -343,7 +343,7 @@ mod tests {
             width: 320,
             height: 192,
         };
-        let place = KittyPlacement::new(pane, desktop, ScaleMode::Fit).unwrap();
+        let place = KittyPlacement::new(pane, desktop, ScaleMode::Proportional).unwrap();
         assert_eq!(
             place.raster,
             RasterSize {
@@ -369,7 +369,7 @@ mod tests {
         );
         assert_eq!(pane.control_at(76, 1, options), None);
 
-        let fill = KittyPlacement::new(pane, desktop, ScaleMode::Fill).unwrap();
+        let fill = KittyPlacement::new(pane, desktop, ScaleMode::Stretch).unwrap();
         assert_eq!(
             fill.area,
             ScreenArea::Cells(CellRect {
@@ -384,8 +384,8 @@ mod tests {
     #[test]
     fn fill_covers_the_interior_and_maps_each_axis_independently() {
         let pane = pane(80, 24, 800, 480);
-        let scale = ScaleMode::Fit.toggled();
-        assert_eq!(scale.toggled(), ScaleMode::Fit);
+        let scale = ScaleMode::Proportional.toggled();
+        assert_eq!(scale.toggled(), ScaleMode::Proportional);
         let place = KittyPlacement::new(
             pane,
             RasterSize {

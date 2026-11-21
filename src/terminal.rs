@@ -18,24 +18,24 @@ const CLOSE_LABEL: &str = "[X]";
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum ScaleMode {
     #[default]
-    Fit,
-    Fill,
+    Proportional,
+    Stretch,
 }
 
 impl ScaleMode {
     pub(crate) fn toggled(self) -> Self {
         match self {
-            Self::Fit => Self::Fill,
-            Self::Fill => Self::Fit,
+            Self::Proportional => Self::Stretch,
+            Self::Stretch => Self::Proportional,
         }
     }
 
     fn label(self, compact: bool) -> &'static str {
         match (self, compact) {
-            (Self::Fit, false) => "[ Fit  ]",
-            (Self::Fill, false) => "[ Fill ]",
-            (Self::Fit, true) => "F",
-            (Self::Fill, true) => "S",
+            (Self::Stretch, false) => "[ Fit=on  ]",
+            (Self::Proportional, false) => "[ Fit=off ]",
+            (Self::Stretch, true) => "+",
+            (Self::Proportional, true) => "-",
         }
     }
 }
@@ -469,7 +469,7 @@ mod tests {
         pane.paint(
             &mut border,
             RenderOptions {
-                scale: ScaleMode::Fill,
+                scale: ScaleMode::Stretch,
                 ..RenderOptions::default()
             },
             "Test Driver",
@@ -478,15 +478,15 @@ mod tests {
         assert!(
             String::from_utf8(border)
                 .unwrap()
-                .contains("\x1b[7m[ Fill ]\x1b[27m─\x1b[7m[X]\x1b[27m╮")
+                .contains("\x1b[7m[ Fit=on  ]\x1b[27m─\x1b[7m[X]\x1b[27m╮")
         );
-        for scale in [ScaleMode::Fit, ScaleMode::Fill] {
+        for scale in [ScaleMode::Proportional, ScaleMode::Stretch] {
             for (x, y, hit) in [
-                (509, 19, None),
-                (510, 19, Some(Control::Smoothing)),
-                (659, 19, Some(Control::Smoothing)),
-                (669, 19, None),
-                (670, 19, Some(Control::Scale)),
+                (479, 19, None),
+                (480, 19, Some(Control::Smoothing)),
+                (629, 19, Some(Control::Smoothing)),
+                (639, 19, None),
+                (640, 19, Some(Control::Scale)),
                 (749, 19, Some(Control::Scale)),
                 (759, 19, None),
                 (760, 19, Some(Control::Close)),
@@ -531,7 +531,7 @@ mod tests {
                         width: 320,
                         height: 192
                     },
-                    ScaleMode::Fit
+                    ScaleMode::Proportional
                 )
                 .is_none()
             );

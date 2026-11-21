@@ -59,11 +59,20 @@ keyboard input via XTEST. Closing it doesn't stop Xvfb.
 ## Viewer controls
 
 The desktop is centered in a border that fills the pane and automatically
-rescales when the pane is resized. Click the **Fit / Fill** button to switch
-modes: **Fit** preserves proportions; **Fill** stretches the full desktop
-to cover the inside of the frame without cropping. Click
-**Smooth** to switch between filtered scaling (the default) and the original
-nearest-neighbor scaling. Neither mode alters the image at native size.
+rescales when the pane is resized. **Fit=off** (`--fit=0`, the default)
+preserves the desktop's proportions. **Fit=on** (`--fit` or `--fit=1`)
+stretches the full desktop to fill the viewport without cropping.
+**Smooth** is enabled by default (`--smooth=1`); use `--smooth=0` for
+nearest-neighbor scaling. Both
+flags accept `=1` / `=true` to enable or `=0` / `=false` to disable.
+Passing either flag without a value enables it. The toolbar buttons can
+still change either setting during a session.
+Neither smoothing mode alters the image at native size.
+
+```sh
+gui-connect --smooth=false --fit x11://
+```
+
 Mouse movement, clicks,
 drags, scrolling, and common keyboard shortcuts go to the remote desktop.
 Click **`[X]`** or press **F12** to exit locally.
@@ -79,7 +88,7 @@ cargo run --release -- --render text x11://:99
 ```
 
 Text mode uses 24-bit terminal colors and the `▀` character for two image
-samples per cell. It doesn't require Kitty graphics support. Fit / Fill,
+samples per cell. It doesn't require Kitty graphics support. Fit,
 smoothing, and mouse and keyboard input still work, but mouse coordinates
 are limited to cells and small desktop text may be hard to read.
 

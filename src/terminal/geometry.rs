@@ -70,8 +70,8 @@ impl Pane {
             height: interior.rows * self.cell_height,
         };
         let raster = match scale {
-            ScaleMode::Fill => available,
-            ScaleMode::Fit
+            ScaleMode::Stretch => available,
+            ScaleMode::Proportional
                 if available.width * desktop.height <= available.height * desktop.width =>
             {
                 RasterSize {
@@ -79,7 +79,7 @@ impl Pane {
                     height: (available.width * desktop.height / desktop.width).max(1),
                 }
             }
-            ScaleMode::Fit => RasterSize {
+            ScaleMode::Proportional => RasterSize {
                 width: (available.height * desktop.width / desktop.height).max(1),
                 height: available.height,
             },

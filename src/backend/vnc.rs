@@ -13,7 +13,7 @@ use crate::input::{
     DesktopInput, KEY_MODIFIERS, KeyTap, PointerButton, PointerUpdate, ScrollDirection,
 };
 use crate::session::{self, DesktopBackend, DesktopUpdate};
-use crate::{Frame, FrameRegion, RenderMode};
+use crate::{Frame, FrameRegion, ViewerOptions};
 
 const DEFAULT_PORT: NonZeroU16 = NonZeroU16::new(5901).unwrap();
 
@@ -152,7 +152,10 @@ struct VncConnection {
     authentication: Authentication,
 }
 
-pub async fn run(VncTarget { endpoint, username }: VncTarget, render: RenderMode) -> Result<()> {
+pub async fn run(
+    VncTarget { endpoint, username }: VncTarget,
+    options: ViewerOptions,
+) -> Result<()> {
     let password = VncPassword::from_env_or_prompt()?;
     let authentication = match username {
         Some(username) => Authentication::AppleRemoteDesktop { username, password },
@@ -165,7 +168,7 @@ pub async fn run(VncTarget { endpoint, username }: VncTarget, render: RenderMode
     let desktop = time::timeout(Duration::from_secs(15), VncDesktop::connect(connection))
         .await
         .context("timed out connecting to the VNC server")??;
-    session::run(desktop, render).await
+    session::run(desktop, options).await
 }
 
 struct VncDesktop {

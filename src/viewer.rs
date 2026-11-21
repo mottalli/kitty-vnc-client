@@ -4,7 +4,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEvent, Mo
 
 use crate::input::{DesktopInput, Pointer, PointerUpdate, key_tap};
 use crate::terminal::{Control, Pane, RenderOptions, Terminal, TerminalIo, Viewport};
-use crate::{Frame, RenderMode};
+use crate::{Frame, ViewerOptions};
 
 pub(crate) enum ViewerEvent {
     None,
@@ -23,10 +23,10 @@ pub(crate) struct Viewer<I: TerminalIo> {
 }
 
 impl<I: TerminalIo> Viewer<I> {
-    pub(crate) fn open(io: I, mode: RenderMode, title: &'static str) -> io::Result<Self> {
-        let mut terminal = Terminal::open(io, mode, title)?;
+    pub(crate) fn open(io: I, settings: ViewerOptions, title: &'static str) -> io::Result<Self> {
+        let mut terminal = Terminal::open(io, settings.render, title)?;
         let pane = terminal.pane()?;
-        let options = RenderOptions::default();
+        let options = settings.initial;
         let viewport = terminal.draw(pane, None, options)?;
         Ok(Self {
             terminal,

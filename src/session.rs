@@ -10,7 +10,7 @@ use tokio::time::{self, Instant, MissedTickBehavior};
 use crate::input::DesktopInput;
 use crate::terminal::{Console, TerminalIo};
 use crate::viewer::{Viewer, ViewerEvent};
-use crate::{Frame, RenderMode};
+use crate::{Frame, ViewerOptions};
 
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
@@ -50,8 +50,8 @@ pub fn require_terminal() -> Result<()> {
     Ok(())
 }
 
-pub(crate) async fn run(desktop: impl DesktopBackend, render: RenderMode) -> Result<()> {
-    run_with(desktop, Console::new(), render, || {
+pub(crate) async fn run(desktop: impl DesktopBackend, options: ViewerOptions) -> Result<()> {
+    run_with(desktop, Console::new(), options, || {
         let mut refresh = time::interval_at(Instant::now() + REFRESH_INTERVAL, REFRESH_INTERVAL);
         refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
         let ticks = stream::unfold(refresh, |mut refresh| async move {
@@ -66,7 +66,7 @@ pub(crate) async fn run(desktop: impl DesktopBackend, render: RenderMode) -> Res
 async fn run_with<E, T>(
     mut desktop: impl DesktopBackend,
     io: impl TerminalIo,
-    render: RenderMode,
+    options: ViewerOptions,
     sources: impl FnOnce() -> (E, T),
 ) -> Result<()>
 where
@@ -74,7 +74,7 @@ where
     T: Stream<Item = ()>,
 {
     let result = async {
-        let mut viewer = Viewer::open(io, render, desktop.frame_title())?;
+        let mut viewer = Viewer::open(io, options, desktop.frame_title())?;
         let (events, ticks) = sources();
         let result = drive(&mut desktop, &mut viewer, events, ticks).await;
         if let Some(release) = viewer.reset_pointer() {

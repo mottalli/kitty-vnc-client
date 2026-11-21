@@ -3,15 +3,16 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 use anyhow::{Context, Result, bail};
-use clap::builder::TypedValueParser;
+use clap::builder::{BoolishValueParser, TypedValueParser};
 use clap::error::ErrorKind;
-use clap::{Arg, Command, CommandFactory, Parser};
+use clap::{Arg, ArgAction, Command, CommandFactory, Parser};
 
-use crate::RenderMode;
 use crate::backend::{
     vnc::VncTarget,
     x11::{X11Authority, X11Connection},
 };
+use crate::terminal::{RenderOptions, Sampling, ScaleMode};
+use crate::{RenderMode, ViewerOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConnectionTarget {
@@ -47,7 +48,7 @@ impl FromStr for ConnectionTarget {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct ViewerArgs {
     pub target: ConnectionTarget,
-    pub render: RenderMode,
+    pub viewer: ViewerOptions,
 }
 
 #[derive(Clone)]
@@ -97,6 +98,14 @@ struct Cli {
     #[arg(long, value_name = "MODE", value_enum, default_value_t)]
     render: RenderMode,
 
+    /// Smooth the image when scaling; omit the value to enable
+    #[arg(long, value_name = "0|1|true|false", action = ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = BoolishValueParser::new(), default_value_t = Sampling::default() == Sampling::Smooth)]
+    smooth: bool,
+
+    /// Stretch the desktop to fill the viewport; omit the value to enable
+    #[arg(long, value_name = "0|1|true|false", action = ArgAction::Set, num_args = 0..=1, require_equals = true, default_missing_value = "true", value_parser = BoolishValueParser::new(), default_value_t = ScaleMode::default() == ScaleMode::Stretch)]
+    fit: bool,
+
     /// X11 authorization file; overrides XAUTHORITY
     #[arg(long, value_name = "PATH")]
     xauthority: Option<PathBuf>,
@@ -120,7 +129,21 @@ impl Cli {
         }
         Ok(ViewerArgs {
             target,
-            render: self.render,
+            viewer: ViewerOptions {
+                render: self.render,
+                initial: RenderOptions {
+                    scale: if self.fit {
+                        ScaleMode::Stretch
+                    } else {
+                        ScaleMode::Proportional
+                    },
+                    sampling: if self.smooth {
+                        Sampling::Smooth
+                    } else {
+                        Sampling::Nearest
+                    },
+                },
+            },
         })
     }
 }
@@ -147,14 +170,20 @@ mod tests {
             parse(&["--render", "text", "vnc://alice@desktop.local:5902"]).unwrap(),
             ViewerArgs {
                 target: ConnectionTarget::Vnc("alice@desktop.local:5902".parse().unwrap()),
-                render: RenderMode::Text,
+                viewer: ViewerOptions {
+                    render: RenderMode::Text,
+                    ..ViewerOptions::default()
+                },
             },
         );
         assert_eq!(
             parse(&["x11://", "--render=text"]).unwrap(),
             ViewerArgs {
                 target: ConnectionTarget::X11(X11Connection::default()),
-                render: RenderMode::Text,
+                viewer: ViewerOptions {
+                    render: RenderMode::Text,
+                    ..ViewerOptions::default()
+                },
             },
         );
         assert_eq!(
@@ -164,9 +193,42 @@ mod tests {
                     target: ":99".parse().unwrap(),
                     ..X11Connection::default()
                 }),
-                render: RenderMode::Kitty,
+                viewer: ViewerOptions::default(),
             },
         );
+    }
+
+    #[test]
+    fn starts_smooth_and_proportional_by_default_but_accepts_boolean_overrides() {
+        let defaults = parse(&["x11://"]).unwrap().viewer.initial;
+        assert_eq!(defaults.scale, ScaleMode::Proportional);
+        assert_eq!(defaults.sampling, Sampling::Smooth);
+
+        for args in [
+            &["x11://", "--smooth=0", "--fit=1"][..],
+            &["--smooth=false", "--fit=true", "x11://"][..],
+            &["--smooth=false", "--fit", "x11://"][..],
+        ] {
+            let parsed = parse(args).unwrap();
+            assert_eq!(
+                parsed.target,
+                ConnectionTarget::X11(X11Connection::default())
+            );
+            assert_eq!(parsed.viewer.initial.scale, ScaleMode::Stretch);
+            assert_eq!(parsed.viewer.initial.sampling, Sampling::Nearest);
+        }
+        for args in [
+            &["--smooth=1", "--fit=0", "x11://"][..],
+            &["--smooth=true", "--fit=false", "x11://"][..],
+            &["--fit=false", "--smooth", "x11://"][..],
+        ] {
+            let parsed = parse(args).unwrap();
+            assert_eq!(
+                parsed.target,
+                ConnectionTarget::X11(X11Connection::default())
+            );
+            assert_eq!(parsed.viewer.initial, defaults);
+        }
     }
 
     #[test]
@@ -175,6 +237,8 @@ mod tests {
         assert_eq!(help.kind(), ErrorKind::DisplayHelp);
         let help = help.to_string();
         assert!(help.contains("--xauthority"));
+        assert!(help.contains("--smooth"));
+        assert!(help.contains("--fit"));
         assert!(help.contains("x11:///absolute/socket"));
         assert_eq!(
             parse(&["--version"]).unwrap_err().kind(),
@@ -207,7 +271,7 @@ mod tests {
                         authority: X11Authority::File(PathBuf::from("/tmp/session auth")),
                         ..X11Connection::default()
                     }),
-                    render: RenderMode::Kitty,
+                    viewer: ViewerOptions::default(),
                 }
             );
         }
@@ -246,6 +310,8 @@ mod tests {
             &["--render"][..],
             &["--render=sixel"][..],
             &["--render=text", "--render=kitty"][..],
+            &["--smooth=2"][..],
+            &["--fit=maybe"][..],
             &["x11://:98", "x11://:99"][..],
             &["--server", "vnc://localhost"][..],
             &["localhost:5901"][..],
